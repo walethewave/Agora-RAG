@@ -2,7 +2,7 @@
 Quick test for your RAG system - just update the PDF path!
 """
 
-from simple_rag_claude import SimpleRAGSystem
+from src.simple_rag_claude import SimpleRAGSystem
 
 # Your PDF file path
 PDF_PATH = "Hands On Machine Learning with Scikit Learn and TensorFlow (1).pdf"
