@@ -25,7 +25,7 @@ class SimpleRAGSystem:
         )
         
         # Model IDs
-        self.embedding_model = "amazon.titan-embed-text-v2:0"  # Titan v2 embeddings
+        self.embedding_model = "amazon.titan-embed-text-v2:0"  # Titan v2 embed4dings
         self.chat_model = "anthropic.claude-3-5-sonnet-20240620-v1:0"  # Claude 3.5 Sonnet
         
         # Initialize Pinecone
@@ -574,33 +574,164 @@ Please provide a clear and accurate answer based only on the information in the 
             raise e
 
 
-# If this file is run directly, execute a test
-if __name__ == "__main__":
-    # PDF path - UPDATE this to your actual PDF file path
-    PDF_PATH = "Hands On Machine Learning with Scikit Learn and TensorFlow (1).pdf"
-    
-    print("🚀 Running Simple RAG System Test")
-    print(f"📄 PDF Path: {PDF_PATH}")
+# Interactive Pipeline - Run the RAG system with menu options
+def run_rag_pipeline():
+    """Interactive pipeline for document management and Q&A"""
+    print("🚀 RAG Document Management Pipeline")
+    print("=" * 50)
     
     try:
-        # Initialize the system
+        # Initialize system
+        print("🔗 Initializing RAG system...")
         rag = SimpleRAGSystem()
+        print("✅ System ready!")
         
-        # Test Function 1
-        print("\n📤 Testing Function 1: PDF to Pinecone")
-        doc_id = rag.function_1_pdf_to_pinecone(PDF_PATH, "Test Document")
-        print(f"✅ Document uploaded with ID: {doc_id[:8]}...")
-        
-        # Test querying
-        print("\n❓ Testing question answering")
-        answer = rag.generate_answer("What is this document about?")
-        print(f"💡 Answer: {answer['answer']}")
-        
-        print("\n🎉 Test completed successfully!")
-        
+        while True:
+            # Show current documents
+            docs = rag.list_documents()
+            print(f"\n📋 Current Knowledge Base: {len(docs)} document(s)")
+            for doc in docs:
+                print(f"   📄 {doc['filename']} ({doc['chunk_count']} chunks)")
+            
+            # Main menu
+            print("\n" + "=" * 50)
+            print("🔧 PIPELINE OPTIONS:")
+            print("1. 📤 Upload New PDF (Function 1)")
+            print("2. ➕ Add Additional Document (Function 2)")
+            print("3. 🔄 Update Existing Document (Function 4)")
+            print("4. ❓ Ask Questions")
+            print("5. � List All Documents")
+            print("6. 🧪 Test Custom Chunking (Function 3)")
+            print("7. 🚪 Exit")
+            print("=" * 50)
+            
+            choice = input("👉 Select option (1-7): ").strip()
+            
+            if choice == "1":
+                # Function 1: Upload new PDF
+                print("\n📤 UPLOAD NEW PDF (Function 1)")
+                pdf_path = input("📄 Enter PDF file path: ").strip()
+                doc_name = input("📝 Enter document name (optional): ").strip() or None
+                
+                try:
+                    print("🔄 Processing...")
+                    doc_id = rag.function_1_pdf_to_pinecone(pdf_path, doc_name)
+                    print(f"✅ Success! Document ID: {doc_id}")
+                except Exception as e:
+                    print(f"❌ Error: {e}")
+            
+            elif choice == "2":
+                # Function 2: Add additional document
+                print("\n➕ ADD ADDITIONAL DOCUMENT (Function 2)")
+                pdf_path = input("📄 Enter PDF file path: ").strip()
+                doc_name = input("📝 Enter document name (optional): ").strip() or None
+                
+                try:
+                    print("🔄 Processing...")
+                    doc_id = rag.function_2_upload_additional_document(pdf_path, doc_name)
+                    print(f"✅ Success! Document ID: {doc_id}")
+                except Exception as e:
+                    print(f"❌ Error: {e}")
+            
+            elif choice == "3":
+                # Function 4: Update existing document
+                print("\n🔄 UPDATE EXISTING DOCUMENT (Function 4)")
+                if not docs:
+                    print("❌ No documents to update. Upload some documents first!")
+                    continue
+                
+                print("Available documents:")
+                for i, doc in enumerate(docs, 1):
+                    print(f"   {i}. {doc['filename']} (ID: {doc['document_id'][:8]}...)")
+                
+                try:
+                    doc_index = int(input("👉 Select document number to update: ")) - 1
+                    if 0 <= doc_index < len(docs):
+                        doc_id = docs[doc_index]['document_id']
+                        pdf_path = input("📄 Enter new PDF file path: ").strip()
+                        doc_name = input("📝 Enter new document name (optional): ").strip() or None
+                        
+                        print("🔄 Updating...")
+                        updated_id = rag.function_4_update_document(doc_id, pdf_path, doc_name)
+                        print(f"✅ Success! Document updated: {updated_id}")
+                    else:
+                        print("❌ Invalid selection!")
+                except (ValueError, Exception) as e:
+                    print(f"❌ Error: {e}")
+            
+            elif choice == "4":
+                # Ask questions
+                print("\n❓ ASK QUESTIONS")
+                if not docs:
+                    print("❌ No documents available. Upload some documents first!")
+                    continue
+                
+                while True:
+                    question = input("\n🤔 Your question (or 'back' to return): ").strip()
+                    if question.lower() == 'back':
+                        break
+                    if not question:
+                        continue
+                    
+                    try:
+                        print("💭 Generating answer...")
+                        result = rag.generate_answer(question)
+                        print(f"\n💡 Answer:")
+                        print(result['answer'])
+                        
+                        if result['sources']:
+                            print(f"\n📚 Sources:")
+                            for i, source in enumerate(result['sources'][:3], 1):
+                                print(f"   {i}. {source['filename']} (Page {source['page_number']}) - Score: {source['relevance_score']:.2f}")
+                    except Exception as e:
+                        print(f"❌ Error: {e}")
+            
+            elif choice == "5":
+                # List documents
+                print("\n� ALL DOCUMENTS")
+                if docs:
+                    for doc in docs:
+                        print(f"📄 {doc['filename']}")
+                        print(f"   ID: {doc['document_id']}")
+                        print(f"   Chunks: {doc['chunk_count']}")
+                        print(f"   Created: {doc.get('created_at', 'Unknown')}")
+                        print()
+                else:
+                    print("📭 No documents found.")
+            
+            elif choice == "6":
+                # Function 3: Custom chunking test
+                print("\n🧪 TEST CUSTOM CHUNKING (Function 3)")
+                pdf_path = input("📄 Enter PDF file path: ").strip()
+                doc_name = input("📝 Enter document name (optional): ").strip() or None
+                
+                try:
+                    chunk_size = int(input("🔢 Enter chunk size (default 200): ").strip() or "200")
+                    print("🔄 Processing with custom chunking...")
+                    result = rag.function_3_upload_and_chunk_document(pdf_path, doc_name, chunk_size)
+                    
+                    print(f"✅ Success!")
+                    print(f"   Document ID: {result['document_id']}")
+                    print(f"   Total chunks: {result['total_chunks']}")
+                    print(f"   Chunk size used: {result['chunk_size_used']}")
+                    print(f"   Total tokens: {result['total_tokens']}")
+                except (ValueError, Exception) as e:
+                    print(f"❌ Error: {e}")
+            
+            elif choice == "7":
+                print("\n👋 Goodbye! Your documents are safely stored in Pinecone.")
+                break
+            
+            else:
+                print("❌ Invalid option! Please select 1-7.")
+    
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"❌ System Error: {e}")
         print("\n💡 Make sure:")
-        print("1. Update PDF_PATH to your actual file")
-        print("2. Your .env file has correct API keys")
-        print("3. Pinecone index exists with dimension 1024")
+        print("1. Your .env file has correct API keys")
+        print("2. Pinecone index exists with dimension 1024")
+        print("3. AWS Bedrock access is configured")
+
+# Run the pipeline when script is executed directly
+if __name__ == "__main__":
+    run_rag_pipeline()
