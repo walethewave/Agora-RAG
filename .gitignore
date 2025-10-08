@@ -1,6 +1,6 @@
 # Environment variables (contains API keys - DO NOT COMMIT)
 .env
-
+.env.backup
 # Python
 __pycache__/
 *.py[cod]
