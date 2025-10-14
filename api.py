@@ -10,13 +10,16 @@ REST API endpoints for the 4 core RAG functions:
 Perfect for backend integration!
 """
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-from typing import Optional
-import tempfile
 import os
-from simplified_rag import SimplifiedRAG
+import boto3
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, BackgroundTasks
+from botocore.exceptions import NoCredentialsError, ClientError
+from fastapi.responses import JSONResponse
+from typing import Optional
+from mangum import Mangum
+
+from src.simplified_rag import SimplifiedRAG
+from src.models import QuestionRequest
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -25,8 +28,15 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Initialize RAG system
+handler = Mangum(app)
+
+# Initializations
 rag_system = None
+MAX_FILE_SIZE_MB = 2  # 2 MB limit
+S3_BUCKET = os.getenv("S3_BUCKET_NAME", "simplified-rag-app")
+S3_REGION = os.getenv("AWS_REGION", "us-east-1")
+s3_client = boto3.client("s3", region_name=S3_REGION)
+
 
 @app.on_event("startup")
 async def startup_event():
@@ -38,14 +48,7 @@ async def startup_event():
     except Exception as e:
         print(f"❌ Failed to initialize RAG system: {e}")
 
-# Request/Response models
-class QuestionRequest(BaseModel):
-    question: str
 
-class ProcessResponse(BaseModel):
-    success: bool
-    message: str
-    data: dict
 
 @app.get("/")
 async def root():
@@ -60,6 +63,51 @@ async def root():
             "GET /stats - Get database statistics"
         ]
     }
+
+
+@app.post("/upload_file")
+async def upload_document(
+    file_name: str = Form(...),
+    file: UploadFile = File(...)
+):
+    # Ensure file is a PDF
+    if not file.filename.lower().endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported")
+    
+    # Read file bytes to check size
+    file_bytes = await file.read()
+    file_size_mb = len(file_bytes) / (1024 * 1024)
+
+    if file_size_mb > MAX_FILE_SIZE_MB:
+        print(2)
+        raise HTTPException(
+            status_code=400,
+            detail=f"File too large ({file_size_mb:.2f} MB). Max allowed size is {MAX_FILE_SIZE_MB} MB."
+        )
+
+    try:
+        # Reset file pointer for upload
+        file.file.seek(0)
+
+        # S3 key and upload
+        s3_key = f"{file_name.lower().replace(' ', '_')}.pdf"
+        s3_client.upload_fileobj(
+            file.file,
+            S3_BUCKET,
+            s3_key,
+            ExtraArgs={"ContentType": file.content_type}
+        )
+
+        file_url = f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{s3_key}"
+        return {"message": "Upload successful", "file_url": file_url}
+
+    except NoCredentialsError:
+        raise HTTPException(status_code=401, detail="AWS credentials not available")
+    except ClientError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to upload file: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {e}")
+    
 
 @app.get("/stats")
 async def get_stats():
@@ -80,71 +128,11 @@ async def get_stats():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/process-document")
-async def process_document(
-    file: UploadFile = File(...),
-    document_name: Optional[str] = Form(None),
-    chunk_size: Optional[int] = Form(200)
-):
-    """
-    FUNCTION 1: Complete PDF Processing Pipeline
-    Upload PDF → Process → Chunk → Embed → Store in Pinecone
-    """
-    if not rag_system:
-        raise HTTPException(status_code=500, detail="RAG system not initialized")
-    
-    if not file.filename.lower().endswith('.pdf'):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported")
-    
-    try:
-        # Save uploaded file temporarily
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
-            content = await file.read()
-            temp_file.write(content)
-            temp_path = temp_file.name
-        
-        # Process the document
-        result = rag_system.function_1_process_complete_document(
-            pdf_path=temp_path,
-            document_name=document_name or file.filename,
-            chunk_size=chunk_size
-        )
-        
-        # Clean up temp file
-        os.unlink(temp_path)
-        
-        if result['success']:
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "success": True,
-                    "message": "Document processed successfully",
-                    "data": result
-                }
-            )
-        else:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "success": False,
-                    "message": f"Processing failed: {result['error']}",
-                    "data": result
-                }
-            )
-            
-    except Exception as e:
-        # Clean up temp file if it exists
-        if 'temp_path' in locals():
-            try:
-                os.unlink(temp_path)
-            except:
-                pass
-        raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/add-document")
-async def add_document(
-    file: UploadFile = File(...),
-    document_name: Optional[str] = Form(None),
+@app.post("/update-database")
+async def update_database(
+    background_tasks: BackgroundTasks,
+    document_name: str = Form(...),
     chunk_size: Optional[int] = Form(200)
 ):
     """
@@ -153,58 +141,28 @@ async def add_document(
     """
     if not rag_system:
         raise HTTPException(status_code=500, detail="RAG system not initialized")
-    
-    if not file.filename.lower().endswith('.pdf'):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported")
-    
-    try:
-        # Save uploaded file temporarily
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
-            content = await file.read()
-            temp_file.write(content)
-            temp_path = temp_file.name
-        
-        # Add to collection
-        result = rag_system.function_2_add_to_existing_collection(
-            pdf_path=temp_path,
-            document_name=document_name or file.filename,
+
+    def background_add():
+        rag_system.function_2_add_to_existing_collection(
+            document_name=document_name,
             chunk_size=chunk_size
         )
-        
-        # Clean up temp file
-        os.unlink(temp_path)
-        
-        if result['success']:
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "success": True,
-                    "message": "Document added to collection successfully",
-                    "data": result
-                }
-            )
-        else:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "success": False,
-                    "message": f"Adding document failed: {result['error']}",
-                    "data": result
-                }
-            )
-            
-    except Exception as e:
-        if 'temp_path' in locals():
-            try:
-                os.unlink(temp_path)
-            except:
-                pass
-        raise HTTPException(status_code=500, detail=str(e))
+
+    background_tasks.add_task(background_add)
+
+    return JSONResponse(
+        status_code=202,
+        content={
+            "success": True,
+            "message": f"Background task started to add '{document_name}' to collection."
+        }
+    )
+
 
 @app.post("/replace-database")
 async def replace_database(
-    file: UploadFile = File(...),
-    document_name: Optional[str] = Form(None),
+    background_tasks: BackgroundTasks,
+    document_name: str = Form(...),
     chunk_size: Optional[int] = Form(200),
     confirm: str = Form(...)
 ):
@@ -215,59 +173,30 @@ async def replace_database(
     """
     if not rag_system:
         raise HTTPException(status_code=500, detail="RAG system not initialized")
-    
-    if confirm != "YES":
+
+    if confirm.lower() != "yes":
         raise HTTPException(
             status_code=400, 
             detail="Must confirm with 'YES' to replace entire database"
         )
-    
-    if not file.filename.lower().endswith('.pdf'):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported")
-    
-    try:
-        # Save uploaded file temporarily
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
-            content = await file.read()
-            temp_file.write(content)
-            temp_path = temp_file.name
-        
-        # Replace entire database
-        result = rag_system.function_3_replace_entire_database(
-            pdf_path=temp_path,
-            document_name=document_name or file.filename,
+
+    def background_replace():
+        rag_system.function_3_replace_entire_database(
+            document_name=document_name,
             chunk_size=chunk_size
         )
-        
-        # Clean up temp file
-        os.unlink(temp_path)
-        
-        if result['success']:
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "success": True,
-                    "message": "Database replaced successfully",
-                    "data": result
-                }
-            )
-        else:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "success": False,
-                    "message": f"Database replacement failed: {result['error']}",
-                    "data": result
-                }
-            )
-            
-    except Exception as e:
-        if 'temp_path' in locals():
-            try:
-                os.unlink(temp_path)
-            except:
-                pass
-        raise HTTPException(status_code=500, detail=str(e))
+
+    background_tasks.add_task(background_replace)
+
+    return JSONResponse(
+        status_code=202,
+        content={
+            "success": True,
+            "message": f"Background database replacement started for '{document_name}'."
+        }
+    )
+
+
 
 @app.post("/ask-question")
 async def ask_question(request: QuestionRequest):

@@ -12,16 +12,25 @@ Perfect for backend developers - clean, simple API
 import os
 import uuid
 import time
+import logging
 from datetime import datetime
 from typing import List, Dict, Optional, Any
 import boto3
 import tiktoken
+from io import BytesIO
 from pinecone import Pinecone, ServerlessSpec
 from PyPDF2 import PdfReader
 from dotenv import load_dotenv
+from fastapi import HTTPException
+
+
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
+aws_region = "us-east-1" 
+S3_BUCKET = os.getenv("S3_BUCKET_NAME", "simplified-rag-app")
+s3_client = boto3.client('s3', region_name=aws_region)
 
 class SimplifiedRAG:
     """Simplified RAG system with 4 core functions for backend integration"""
@@ -60,10 +69,10 @@ class SimplifiedRAG:
         
         print("✅ Simplified RAG system initialized successfully!")
     
-    def _extract_pdf_text(self, pdf_path: str) -> List[Dict[str, Any]]:
+    def _extract_pdf_text(self, file_bytes: bytes) -> List[Dict[str, Any]]:
         """Extract text from PDF with page metadata"""
         try:
-            reader = PdfReader(pdf_path)
+            reader = PdfReader(BytesIO(file_bytes))
             pages = []
             
             for page_num, page in enumerate(reader.pages, 1):
@@ -79,6 +88,24 @@ class SimplifiedRAG:
             
         except Exception as e:
             raise Exception(f"Failed to extract PDF text: {str(e)}")
+
+
+    def _get_s3_file_content(self, response, S3_BUCKET: str) -> bytes | None:
+        """Retrieve the first PDF file from S3 and return its bytes."""
+        try:
+            for obj in response.get("Contents", []):
+                key = obj["Key"]
+                if key.lower().endswith(".pdf"):
+                    logger.info(f"Fetching PDF from S3: {key}")
+                    file_obj = s3_client.get_object(Bucket=S3_BUCKET, Key=key)
+                    return file_obj["Body"].read()  # return bytes immediately
+
+            logger.warning("No PDF files found in S3 response.")
+            return None
+
+        except Exception as e:
+            logger.error(f"Error retrieving PDF from S3: {e}")
+            return None
     
     def _create_chunks(self, pages: List[Dict], chunk_size: int = 200, overlap_percent: float = 0.1) -> List[Dict[str, Any]]:
         """Create overlapping chunks from pages with metadata"""
@@ -176,7 +203,7 @@ class SimplifiedRAG:
     # CORE FUNCTIONS
     # =================
     
-    def function_1_process_complete_document(self, pdf_path: str, document_name: Optional[str] = None, 
+    def _function_1_process_complete_document(self, filename: str, 
                                            chunk_size: int = 200) -> Dict[str, Any]:
         """
         FUNCTION 1: Complete PDF Processing Pipeline
@@ -197,13 +224,21 @@ class SimplifiedRAG:
         try:
             # Generate document ID and name
             document_id = str(uuid.uuid4())
-            filename = document_name or os.path.basename(pdf_path)
             
             print(f"🚀 Processing document: {filename}")
             
             # Step 1: Extract PDF text
-            print("📄 Extracting PDF text...")
-            pages = self._extract_pdf_text(pdf_path)
+            print("📄 Extracting file bytes...")
+            response = s3_client.list_objects_v2(
+                Bucket=S3_BUCKET,
+                Prefix=f"{filename.lower().replace(' ', '_')}.pdf"
+            )
+            
+            if 'Contents' not in response:
+                raise HTTPException(status_code=404, detail="No files found for the specified company")
+            
+            file_bytes = self._get_s3_file_content(response, S3_BUCKET)
+            pages = self._extract_pdf_text(file_bytes) #type: ignore
             total_pages = len(pages)
             
             # Step 2: Create chunks
@@ -238,7 +273,6 @@ class SimplifiedRAG:
                 'pinecone_vectors_uploaded': upload_result['vectors_uploaded'],
                 'created_at': upload_result['timestamp'],
                 'metadata': {
-                    'pdf_path': pdf_path,
                     'embedding_model': self.embedding_model,
                     'index_name': self.index_name
                 }
@@ -255,7 +289,7 @@ class SimplifiedRAG:
                 'processing_time_seconds': time.time() - start_time
             }
     
-    def function_2_add_to_existing_collection(self, pdf_path: str, document_name: Optional[str] = None, 
+    def function_2_add_to_existing_collection(self, document_name: str, 
                                             chunk_size: int = 200) -> Dict[str, Any]:
         """
         FUNCTION 2: Add Document to Existing Collection
@@ -278,7 +312,7 @@ class SimplifiedRAG:
         initial_vector_count = stats['total_vector_count']
         
         # Process the document (same as function 1)
-        result = self.function_1_process_complete_document(pdf_path, document_name, chunk_size)
+        result = self._function_1_process_complete_document( document_name, chunk_size)
         
         if result['success']:
             # Update result with collection info
@@ -293,7 +327,7 @@ class SimplifiedRAG:
         
         return result
     
-    def function_3_replace_entire_database(self, pdf_path: str, document_name: Optional[str] = None, 
+    def function_3_replace_entire_database(self, document_name: str, 
                                          chunk_size: int = 200) -> Dict[str, Any]:
         """
         FUNCTION 3: Replace Entire Database
@@ -324,7 +358,7 @@ class SimplifiedRAG:
             print("🗑️ Database cleared!")
             
             # Process new document
-            result = self.function_1_process_complete_document(pdf_path, document_name, chunk_size)
+            result = self._function_1_process_complete_document( document_name, chunk_size)
             
             if result['success']:
                 result['database_replacement_info'] = {
@@ -507,173 +541,135 @@ Answer:"""
 # INTERACTIVE DEMO
 # =================
 
-def run_interactive_demo():
-    """Interactive demo for testing the 4 core functions"""
-    print("🚀 Simplified RAG System - Interactive Demo")
-    print("=" * 50)
+# def run_interactive_demo():
+#     """Interactive demo for testing the 4 core functions"""
+#     print("🚀 Simplified RAG System - Interactive Demo")
+#     print("=" * 50)
     
-    try:
-        rag = SimplifiedRAG()
+#     try:
+#         rag = SimplifiedRAG()
         
-        while True:
-            print(f"\n📊 Database Stats: {rag.get_database_stats()['total_vectors']} vectors")
+#         while True:
+#             print(f"\n📊 Database Stats: {rag.get_database_stats()['total_vectors']} vectors")
             
-            print("\n🔧 SELECT FUNCTION:")
-            print("1. 🚀 Process Complete Document (PDF → Pinecone)")
-            print("2. ➕ Add Document to Existing Collection")
-            print("3. 🔄 Replace Entire Database")
-            print("4. ❓ Ask Questions")
-            print("5. 📋 List All Documents")
-            print("6. 🚪 Exit")
-            print("=" * 50)
+#             print("\n🔧 SELECT FUNCTION:")
+#             print("1. 🚀 Process Complete Document (PDF → Pinecone)")
+#             print("2. ➕ Add Document to Existing Collection")
+#             print("3. 🔄 Replace Entire Database")
+#             print("4. ❓ Ask Questions")
+#             print("5. 📋 List All Documents")
+#             print("6. 🚪 Exit")
+#             print("=" * 50)
             
-            choice = input("👉 Select function (1-6): ").strip()
+#             choice = input("👉 Select function (1-6): ").strip()
             
-            if choice == "1":
-                print("\n🚀 FUNCTION 1: Process Complete Document")
-                pdf_path = input("📄 Enter PDF file path: ").strip()
-                doc_name = input("📝 Document name (optional): ").strip() or None
+#             if choice == "1":
+#                 print("\n🚀 FUNCTION 1: Process Complete Document")
+#                 pdf_path = input("📄 Enter PDF file path: ").strip()
+#                 doc_name = input("📝 Document name (optional): ").strip() or None
                 
-                result = rag.function_1_process_complete_document(pdf_path, doc_name)
+#                 result = rag.function_1_process_complete_document(pdf_path, doc_name)
                 
-                if result['success']:
-                    print(f"\n✅ SUCCESS!")
-                    print(f"📄 Document ID: {result['document_id']}")
-                    print(f"⏱️ Processing Time: {result['processing_time_seconds']}s")
-                    print(f"📊 Total Chunks: {result['total_chunks']}")
-                    print(f"📤 Vectors Uploaded: {result['pinecone_vectors_uploaded']}")
-                else:
-                    print(f"\n❌ ERROR: {result['error']}")
+#                 if result['success']:
+#                     print(f"\n✅ SUCCESS!")
+#                     print(f"📄 Document ID: {result['document_id']}")
+#                     print(f"⏱️ Processing Time: {result['processing_time_seconds']}s")
+#                     print(f"📊 Total Chunks: {result['total_chunks']}")
+#                     print(f"📤 Vectors Uploaded: {result['pinecone_vectors_uploaded']}")
+#                 else:
+#                     print(f"\n❌ ERROR: {result['error']}")
             
-            elif choice == "2":
-                print("\n➕ FUNCTION 2: Add to Existing Collection")
-                pdf_path = input("📄 Enter PDF file path: ").strip()
-                doc_name = input("📝 Document name (optional): ").strip() or None
+#             elif choice == "2":
+#                 print("\n➕ FUNCTION 2: Add to Existing Collection")
+#                 pdf_path = input("📄 Enter PDF file path: ").strip()
+#                 doc_name = input("📝 Document name (optional): ").strip() or None
                 
-                result = rag.function_2_add_to_existing_collection(pdf_path, doc_name)
+#                 result = rag.function_2_add_to_existing_collection(pdf_path, doc_name)
                 
-                if result['success']:
-                    print(f"\n✅ Document Added!")
-                    print(f"📄 Document ID: {result['document_id']}")
-                    print(f"📊 Vectors Added: {result['pinecone_vectors_uploaded']}")
-                    if 'collection_info' in result:
-                        info = result['collection_info']
-                        print(f"📈 Total Vectors: {info['total_vectors_before']} → {info['total_vectors_after']}")
-                else:
-                    print(f"\n❌ ERROR: {result['error']}")
+#                 if result['success']:
+#                     print(f"\n✅ Document Added!")
+#                     print(f"📄 Document ID: {result['document_id']}")
+#                     print(f"📊 Vectors Added: {result['pinecone_vectors_uploaded']}")
+#                     if 'collection_info' in result:
+#                         info = result['collection_info']
+#                         print(f"📈 Total Vectors: {info['total_vectors_before']} → {info['total_vectors_after']}")
+#                 else:
+#                     print(f"\n❌ ERROR: {result['error']}")
             
-            elif choice == "3":
-                print("\n🔄 FUNCTION 3: Replace Entire Database")
-                print("⚠️ WARNING: This will DELETE ALL existing documents!")
-                confirm = input("Type 'YES' to confirm: ").strip()
+#             elif choice == "3":
+#                 print("\n🔄 FUNCTION 3: Replace Entire Database")
+#                 print("⚠️ WARNING: This will DELETE ALL existing documents!")
+#                 confirm = input("Type 'YES' to confirm: ").strip()
                 
-                if confirm == "YES":
-                    pdf_path = input("📄 Enter PDF file path: ").strip()
-                    doc_name = input("📝 Document name (optional): ").strip() or None
+#                 if confirm == "YES":
+#                     pdf_path = input("📄 Enter PDF file path: ").strip()
+#                     doc_name = input("📝 Document name (optional): ").strip() or None
                     
-                    result = rag.function_3_replace_entire_database(pdf_path, doc_name)
+#                     result = rag.function_3_replace_entire_database(pdf_path, doc_name)
                     
-                    if result['success']:
-                        print(f"\n✅ Database Replaced!")
-                        print(f"📄 New Document ID: {result['document_id']}")
-                        info = result['database_replacement_info']
-                        print(f"🗑️ Deleted: {info['vectors_deleted']} vectors")
-                        print(f"📤 Uploaded: {info['new_vectors_uploaded']} vectors")
-                    else:
-                        print(f"\n❌ ERROR: {result['error']}")
-                else:
-                    print("❌ Operation cancelled")
+#                     if result['success']:
+#                         print(f"\n✅ Database Replaced!")
+#                         print(f"📄 New Document ID: {result['document_id']}")
+#                         info = result['database_replacement_info']
+#                         print(f"🗑️ Deleted: {info['vectors_deleted']} vectors")
+#                         print(f"📤 Uploaded: {info['new_vectors_uploaded']} vectors")
+#                     else:
+#                         print(f"\n❌ ERROR: {result['error']}")
+#                 else:
+#                     print("❌ Operation cancelled")
             
-            elif choice == "4":
-                print("\n❓ FUNCTION 4: Ask Questions")
+#             elif choice == "4":
+#                 print("\n❓ FUNCTION 4: Ask Questions")
                 
-                while True:
-                    question = input("\n🤔 Your question (or 'back' to return): ").strip()
-                    if question.lower() == 'back':
-                        break
-                    if not question:
-                        continue
+#                 while True:
+#                     question = input("\n🤔 Your question (or 'back' to return): ").strip()
+#                     if question.lower() == 'back':
+#                         break
+#                     if not question:
+#                         continue
                     
-                    result = rag.function_4_ask_questions(question)
+#                     result = rag.function_4_ask_questions(question)
                     
-                    if result['success']:
-                        print(f"\n💡 Answer:")
-                        print(result['answer'])
+#                     if result['success']:
+#                         print(f"\n💡 Answer:")
+#                         print(result['answer'])
                         
-                        if result['sources']:
-                            print(f"\n📚 Sources ({len(result['sources'])}):")
-                            for i, source in enumerate(result['sources'][:3], 1):
-                                print(f"   {i}. {source['filename']} (Page {source['page_number']}) - Score: {source['relevance_score']}")
+#                         if result['sources']:
+#                             print(f"\n📚 Sources ({len(result['sources'])}):")
+#                             for i, source in enumerate(result['sources'][:3], 1):
+#                                 print(f"   {i}. {source['filename']} (Page {source['page_number']}) - Score: {source['relevance_score']}")
                         
-                        print(f"\n⏱️ Query Time: {result['query_time_seconds']}s")
-                    else:
-                        print(f"\n❌ ERROR: {result['error']}")
+#                         print(f"\n⏱️ Query Time: {result['query_time_seconds']}s")
+#                     else:
+#                         print(f"\n❌ ERROR: {result['error']}")
             
-            elif choice == "5":
-                print("\n📋 ALL DOCUMENTS")
-                docs = rag.list_all_documents()
+#             elif choice == "5":
+#                 print("\n📋 ALL DOCUMENTS")
+#                 docs = rag.list_all_documents()
                 
-                if docs:
-                    for doc in docs:
-                        print(f"\n📄 {doc['filename']}")
-                        print(f"   ID: {doc['document_id']}")
-                        print(f"   Chunks: {doc['chunk_count']}")
-                        print(f"   Created: {doc['created_at']}")
-                else:
-                    print("📭 No documents found")
+#                 if docs:
+#                     for doc in docs:
+#                         print(f"\n📄 {doc['filename']}")
+#                         print(f"   ID: {doc['document_id']}")
+#                         print(f"   Chunks: {doc['chunk_count']}")
+#                         print(f"   Created: {doc['created_at']}")
+#                 else:
+#                     print("📭 No documents found")
             
-            elif choice == "6":
-                print("\n👋 Goodbye! Your documents are safely stored in Pinecone.")
-                break
+#             elif choice == "6":
+#                 print("\n👋 Goodbye! Your documents are safely stored in Pinecone.")
+#                 break
             
-            else:
-                print("❌ Invalid choice! Please select 1-6.")
+#             else:
+#                 print("❌ Invalid choice! Please select 1-6.")
     
-    except Exception as e:
-        print(f"❌ System Error: {e}")
-        print("\n💡 Make sure:")
-        print("1. Your .env file has all required API keys")
-        print("2. AWS credentials are configured")
-        print("3. Pinecone API key is valid")
+#     except Exception as e:
+#         print(f"❌ System Error: {e}")
+#         print("\n💡 Make sure:")
+#         print("1. Your .env file has all required API keys")
+#         print("2. AWS credentials are configured")
+#         print("3. Pinecone API key is valid")
 
 
-# =================
-# BACKEND USAGE EXAMPLES
-# =================
-
-def example_backend_usage():
-    """Example of how backend developers would use these functions"""
-    
-    # Initialize the system
-    rag = SimplifiedRAG()
-    
-    # Function 1: Process a new document completely
-    result1 = rag.function_1_process_complete_document(
-        pdf_path="path/to/document.pdf",
-        document_name="Company Policy Manual",
-        chunk_size=200
-    )
-    
-    if result1['success']:
-        doc_id = result1['document_id']
-        print(f"Document processed: {doc_id}")
-    
-    # Function 2: Add another document to the collection
-    result2 = rag.function_2_add_to_existing_collection(
-        pdf_path="path/to/another_doc.pdf",
-        document_name="Employee Handbook"
-    )
-    
-    # Function 4: Ask questions
-    answer_result = rag.function_4_ask_questions(
-        question="What is the vacation policy?",
-        top_k=5
-    )
-    
-    if answer_result['success']:
-        print("Answer:", answer_result['answer'])
-        print("Sources:", len(answer_result['sources']))
-
-
-if __name__ == "__main__":
-    run_interactive_demo()
+# if __name__ == "__main__":
+#     run_interactive_demo()
