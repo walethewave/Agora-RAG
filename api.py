@@ -133,7 +133,6 @@ async def get_stats():
 async def update_database(
     background_tasks: BackgroundTasks,
     document_name: str = Form(...),
-    chunk_size: Optional[int] = Form(200)
 ):
     """
     FUNCTION 2: Add Document to Existing Collection
@@ -144,8 +143,7 @@ async def update_database(
 
     def background_add():
         rag_system.function_2_add_to_existing_collection(
-            document_name=document_name,
-            chunk_size=chunk_size
+            document_name=document_name
         )
 
     background_tasks.add_task(background_add)
@@ -163,7 +161,6 @@ async def update_database(
 async def replace_database(
     background_tasks: BackgroundTasks,
     document_name: str = Form(...),
-    chunk_size: Optional[int] = Form(200),
     confirm: str = Form(...)
 ):
     """
@@ -182,8 +179,7 @@ async def replace_database(
 
     def background_replace():
         rag_system.function_3_replace_entire_database(
-            document_name=document_name,
-            chunk_size=chunk_size
+            document_name=document_name
         )
 
     background_tasks.add_task(background_replace)
