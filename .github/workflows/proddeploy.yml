@@ -117,9 +117,9 @@ jobs:
             --timeout 900 \
             --memory-size ${{ secrets.LAMBDA_MEMORY_SIZE || '512' }} \
             --environment "Variables={
-              \"PINECONE_API_KEY=${{ secrets.API_KEY }},
-              OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }},
-              DATABASE_URL=${{ secrets.DATABASE_URL }},
+              PINECONE_API_KEY=${{ secrets.PINECONE_API_KEY }},
+              PINECONE_INDEX_NAME=${{ secrets.PINECONE_INDEX_NAME }},
+              S3_BUCKET_NAME=${{ secrets.S3_BUCKET_NAME }},
               ENVIRONMENT=${{ secrets.ENVIRONMENT || 'production' }}
             }"
 
@@ -207,3 +207,24 @@ jobs:
           echo "- **Image:** ${{ steps.build-image.outputs.image }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Function URL:** ${{ steps.get-function-url.outputs.function_url }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Timeout:** 900 seconds (15 minutes)" >> $GITHUB_STEP_SUMMARY
+
+# ## Required GitHub Secrets
+
+# Configure these in: **Repository Settings → Secrets and variables → Actions → New repository secret**
+
+# ### AWS Configuration
+# 1. `AWS_ACCESS_KEY_ID` - AWS access key ID
+# 2. `AWS_SECRET_ACCESS_KEY` - AWS secret access key
+# 3. `AWS_REGION` - AWS region (e.g., us-east-1)
+# 4. `ECR_REPOSITORY` - ECR repository name
+# 5. `LAMBDA_FUNCTION_NAME` - Lambda function name
+# 6. `LAMBDA_ROLE_NAME` - IAM role name for Lambda
+
+# ### Environment Variables (customize to your needs)
+# 7. `PINECONE_API_KEY` - Your API key
+# 8. `PINECONE_INDEX_NAME` - OpenAI API key
+# 9. `S3_BUCKET_NAME` - Database connection string
+# 10. `ENVIRONMENT` - Environment name (optional, defaults to production)
+
+# ### Optional
+# 11. `LAMBDA_MEMORY_SIZE` - Memory in MB (optional, defaults to 512)
