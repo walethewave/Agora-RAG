@@ -3,7 +3,7 @@ name: Deploy Lambda from ECR
 on:
   push:
     branches:
-      # - main
+      - main
   workflow_dispatch:
 
 env:
