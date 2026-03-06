@@ -514,7 +514,23 @@ st.markdown("""
     padding: 1rem 2rem;
     border-bottom: 2px solid #111111;
     text-transform: uppercase;
-">QORPY FAQ</div>
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+">
+    <span>QORPY FAQ</span>
+    <a href="/admin" target="_self" style="
+        font-size: 13px;
+        font-weight: 600;
+        text-transform: none;
+        letter-spacing: 0;
+        color: #ffffff;
+        background: #111111;
+        border-radius: 8px;
+        padding: 6px 16px;
+        text-decoration: none;
+    ">⚙️ Admin Panel</a>
+</div>
 """, unsafe_allow_html=True)
 
 active_conv = st.session_state.conversations[st.session_state.active_id]
