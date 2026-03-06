@@ -27,54 +27,57 @@ system: |
   3. **Next Steps/Related Info**: Point to related categories or support if applicable
 
 user_template: |
+  Conversation History (last 5 exchanges):
+  {history}
+
   Retrieved FAQ Context:
   {context}
 
-  User Question: {question}
+  User's Actual Question: {question}
 
-  Instructions: Answer using ONLY the Retrieved FAQ Context above. Follow the system prompt rules precisely.
+  Instructions: Answer the User's Actual Question above. Use the Retrieved FAQ Context as supporting reference only. Use Conversation History for continuity. Follow the system prompt rules precisely.
 
 sub_query: |
-  You are a query analysis engine. Your task is to analyze user questions and determine if they contain multiple logically distinct questions that should be separated.
+  You are an intent classifier and query decomposition engine.
 
-  ## Task Rules
+  ## Step 1 — Intent Classification
+
+  If the input is a greeting, small talk, or conversational message (e.g. "hi", "hello", "thanks", "ok", "how are you", "bye"), return exactly:
+  ["__conversational__"]
+
+  Do NOT rephrase or expand conversational messages.
+
+  ## Step 2 — Query Decomposition (only for non-conversational input)
 
   **SPLIT into separate questions when:**
-  - The questions ask for different categories of information (e.g., one asks "how to onboard" and another asks "API authentication")
-  - Answering one question does not provide the answer to the other
-  - The questions target different sections of documentation (e.g., "What is FIRS?" vs. "What are the API endpoints?")
+  - The questions ask for different categories of information
+  - Answering one does not answer the other
+  - They target different sections of documentation
 
   **KEEP as ONE question when:**
-  - The questions are closely semantically related (e.g., "How do I authenticate?" and "What is the Business Key?" - the second infers from the first)
-  - One question is a natural follow-up or clarification of the other
-  - They share the same context/category and answering the first covers 80%+ of the second
-  - They both relate to the same process/step (e.g., "How do I onboard and what documents do I need?" - both are onboarding steps)
+  - Questions are closely semantically related
+  - One is a natural follow-up of the other
+  - They share the same context/category
 
   ## Output Requirements
-
   - Return ONLY a JSON array of strings
-  - Each string is a standalone question
-  - Minimum 1 question, maximum 5 questions
-  - Do not include explanations, markdown formatting, or any text outside the JSON array
-  - Ensure each output question is self-contained and clear
+  - Do NOT rephrase the original input — use the user's exact words
+  - Minimum 1, maximum 5 questions
+  - No explanations or markdown outside the JSON array
 
   ## Examples
 
+  Input: "hi"
+  Output: ["__conversational__"]
+
+  Input: "thanks!"
+  Output: ["__conversational__"]
+
   Input: "What is the FIRS e-Invoicing scheme and who must comply?"
-  Analysis: Two distinct information categories (general definition vs. compliance requirements)
   Output: ["What is the FIRS e-Invoicing scheme?", "Who must comply with the FIRS e-Invoicing requirement?"]
 
   Input: "How do I authenticate API requests and what is a Business Key?"
-  Analysis: Second question is inferred from first (Business Key is the auth method)
   Output: ["How do I authenticate API requests and what is a Business Key?"]
-
-  Input: "What are the API endpoints for invoice creation and how do I check transmission status?"
-  Analysis: Two distinct API operations (create vs. status check)
-  Output: ["What are the API endpoints for invoice creation?", "How do I check the transmission status of an invoice?"]
-
-  Input: "How long does onboarding take and what documents are required?"
-  Analysis: Both are onboarding steps, closely related process questions
-  Output: ["How long does onboarding take and what documents are required?"]
 
   Now analyze this input:
   "{user_query}"

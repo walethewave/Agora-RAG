@@ -77,14 +77,21 @@ class ConversationMemory:
     def _key(self, session_id: str) -> str:
         return f"session:{session_id}:history"
 
-    def get_history(self, session_id: str) -> List[Dict[str, str]]:
-        """Return the last MAX_MESSAGES * 2 entries (user+assistant turns)."""
+    def get_history(self, session_id: str) -> str:
+        """Return last MAX_MESSAGES Q&A pairs formatted as conversational context."""
         try:
             raw = self.client.lrange(self._key(session_id), -(self.MAX_MESSAGES * 2), -1)
-            return [json.loads(m) for m in raw]
+            messages = [json.loads(m) for m in raw]
+            if not messages:
+                return "No previous conversation."
+            lines = []
+            for m in messages:
+                role = "User" if m["role"] == "user" else "Qorpy"
+                lines.append(f"{role}: {m['content']}")
+            return "\n".join(lines)
         except Exception as e:
             logger.warning(f"[REDIS] Failed to get history for session {session_id}: {e}")
-            return []
+            return "No previous conversation."
 
     def save(self, session_id: str, user_msg: str, assistant_msg: str):
         """Append user + assistant messages, trim to window, refresh TTL."""
@@ -584,11 +591,34 @@ class SimplifiedRAG:
             logger.info(f"[TIMING] ========== START ask_questions ==========")
             logger.info(f"[TIMING] Question: {question[:100]}")
 
-            # Step 1: Sub-query generation
+            # Step 1: Intent classification + sub-query generation
             t1 = time.time()
             sub_queries = self._generate_sub_queries(question)
             logger.info(f"[TIMING] Step 1 - Sub-query generation: {time.time()-t1:.2f}s")
             logger.info(f"[SUB-QUERIES] {len(sub_queries)} query(s): {sub_queries}")
+
+            # Conversational short-circuit — skip RAG, answer directly
+            if sub_queries == ["__conversational__"]:
+                history = self.memory.get_history(session_id) if (self.memory and session_id) else "No previous conversation."
+                conv_message = (
+                    f"Conversation History (last 5 exchanges):\n{history}\n\n"
+                    f"User's message: {question}\n\n"
+                    f"Respond naturally and conversationally."
+                )
+                request_body = json.dumps({
+                    "system": [{"text": self.system_prompt}],
+                    "messages": [{"role": "user", "content": [{"text": conv_message}]}],
+                    "inferenceConfig": {"maxTokens": 200},
+                })
+                response = self.bedrock.invoke_model(modelId=self.chat_model, body=request_body, contentType='application/json')
+                answer = json.loads(response['body'].read())['output']['message']['content'][0]['text']
+                if self.memory and session_id:
+                    self.memory.save(session_id, question, answer)
+                return {
+                    'success': True, 'answer': answer, 'sources': [], 'question': question,
+                    'query_time_seconds': round(time.time() - start_time, 2),
+                    'chunks_retrieved': 0, 'sub_queries_used': 0,
+                }
 
             # Step 2: Embeddings + Pinecone retrieval — run all sub-queries in parallel
             def retrieve(idx: int, sq: str):
@@ -644,25 +674,20 @@ class SimplifiedRAG:
                     'sub_queries_used': len(sub_queries),
                 }
 
-            # Step 4: Answer synthesis using prompt.yaml templates
+            # Step 4: Answer synthesis — pass original question + context + history
+            history = self.memory.get_history(session_id) if (self.memory and session_id) else "No previous conversation."
+            if history != "No previous conversation.":
+                logger.info(f"[REDIS] Injecting history for session {session_id}")
+
             user_message = self.user_template.format(
+                history=history,
                 context=context_text,
                 question=question,
             )
 
-            # Build messages array: conversation history + current turn
-            history = self.memory.get_history(session_id) if (self.memory and session_id) else []
-            if history:
-                logger.info(f"[REDIS] Injecting {len(history)} history messages for session {session_id}")
-            messages = [
-                {"role": m["role"], "content": [{"text": m["content"]}]}
-                for m in history
-            ]
-            messages.append({"role": "user", "content": [{"text": user_message}]})
-
             request_body = json.dumps({
                 "system": [{"text": self.system_prompt}],
-                "messages": messages,
+                "messages": [{"role": "user", "content": [{"text": user_message}]}],
                 "inferenceConfig": {"maxTokens": 1000},
             })
 
@@ -678,7 +703,7 @@ class SimplifiedRAG:
             answer = result['output']['message']['content'][0]['text']
             logger.info(f"[TIMING] Step 4 - Answer synthesis done: {time.time()-t4:.2f}s")
 
-            # Save this turn to Redis
+            # Save only raw question + answer (no context) to Redis
             if self.memory and session_id:
                 self.memory.save(session_id, question, answer)
 
