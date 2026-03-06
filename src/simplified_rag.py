@@ -54,7 +54,7 @@ class SimplifiedRAG:
                 logger.info(f"Creating new Pinecone index: {self.index_name}")
                 pc.create_index(
                     name=self.index_name,
-                    dimension=1024,  # Titan v2 embedding dimension
+                    dimension=512,  # Titan v2 embedding dimension
                     metric='cosine',
                     spec=ServerlessSpec(cloud='aws', region='us-east-1')
                 )
@@ -63,9 +63,9 @@ class SimplifiedRAG:
             self.index = pc.Index(self.index_name)
             
             # Model configurations
-            self.embedding_model = "amazon.titan-embed-text-v2:0"  # Embedding model
-            self.chat_model = "arn:aws:bedrock:us-east-1:992382810653:inference-profile/us.anthropic.claude-sonnet-4-5-20250929-v1:0"  # LLM for answer synthesis
-            self.fast_model = "arn:aws:bedrock:us-east-1:992382810653:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0"  # Fast LLM for sub-queries
+            self.embedding_model = "amazon.titan-embed-text-v2:0"  # Embedding model (512-dim)
+            self.chat_model = "amazon.nova-lite-v1:0"  # LLM for answer synthesis
+            self.fast_model = "amazon.nova-lite-v1:0"  # Fast LLM for sub-queries
             
             # Tokenizer for chunking (matches Claude models)
             self.tokenizer = tiktoken.get_encoding("cl100k_base")
@@ -195,8 +195,8 @@ class SimplifiedRAG:
         # Iterate over each text chunk
         for text in texts:
             try:
-                # Format the request body for Bedrock Titan
-                request_body = json.dumps({"inputText": text})
+                # Format the request body for Bedrock Titan (512-dim output)
+                request_body = json.dumps({"inputText": text, "dimensions": 512, "normalize": True})
                 
                 # Invoke the Bedrock model
                 response = self.bedrock.invoke_model(
@@ -214,7 +214,7 @@ class SimplifiedRAG:
                 # Log a warning and append a zero vector as a fallback
                 logger.warning(f"Failed to generate embedding for text chunk: {str(e)}")
                 # Use zero vector as fallback to avoid dimension mismatch
-                embeddings.append([0.0] * 1024)
+                embeddings.append([0.0] * 512)
         
         logger.info(f"Generated {len(embeddings)} embeddings.")
         return embeddings
@@ -470,9 +470,8 @@ class SimplifiedRAG:
             )
 
             request_body = json.dumps({
-                "anthropic_version": "bedrock-2023-05-31",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 200
+                "messages": [{"role": "user", "content": [{"text": prompt}]}],
+                "inferenceConfig": {"maxTokens": 200}
             })
 
             logger.info("[TIMING] Calling Bedrock for sub-query generation...")
@@ -483,7 +482,7 @@ class SimplifiedRAG:
             )
 
             result = json.loads(response['body'].read())
-            text = result['content'][0]['text'].strip()
+            text = result['output']['message']['content'][0]['text'].strip()
             # Strip markdown code fences if present (e.g. ```json ... ```)
             json_match = re.search(r'\[.*?\]', text, re.DOTALL)
             if json_match:
@@ -574,9 +573,8 @@ Formatting rules (follow strictly):
 Answer:"""
 
             request_body = json.dumps({
-                "anthropic_version": "bedrock-2023-05-31",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 800
+                "messages": [{"role": "user", "content": [{"text": prompt}]}],
+                "inferenceConfig": {"maxTokens": 800}
             })
 
             t4 = time.time()
@@ -588,7 +586,7 @@ Answer:"""
             )
 
             result = json.loads(response['body'].read())
-            answer = result['content'][0]['text'] if 'content' in result else result.get('completion', 'No answer generated')
+            answer = result['output']['message']['content'][0]['text']
             logger.info(f"[TIMING] Step 4 - Answer synthesis done: {time.time()-t4:.2f}s")
 
             total_time = time.time() - start_time
@@ -678,9 +676,8 @@ Formatting rules (follow strictly):
 Answer:"""
 
             request_body = json.dumps({
-                "anthropic_version": "bedrock-2023-05-31",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 800
+                "messages": [{"role": "user", "content": [{"text": prompt}]}],
+                "inferenceConfig": {"maxTokens": 800}
             })
 
             t4 = time.time()
@@ -697,10 +694,11 @@ Answer:"""
                     chunk = event.get('chunk')
                     if chunk:
                         chunk_data = json.loads(chunk.get('bytes').decode())
-                        if chunk_data.get('type') == 'content_block_delta':
-                            delta = chunk_data.get('delta', {})
-                            if delta.get('type') == 'text_delta':
-                                yield delta.get('text', '')
+                        # Nova Lite streaming format
+                        if 'contentBlockDelta' in chunk_data:
+                            delta = chunk_data['contentBlockDelta'].get('delta', {})
+                            if 'text' in delta:
+                                yield delta['text']
 
             logger.info(f"[TIMING] Step 4 - Streaming done: {time.time()-t4:.2f}s")
             logger.info(f"[TIMING] ========== STREAM TOTAL: {time.time()-start_time:.2f}s ==========")
@@ -721,7 +719,7 @@ Answer:"""
             return {
                 'total_vectors': stats['total_vector_count'],
                 'index_fullness': stats.get('index_fullness', 0), # Serverless may not have this
-                'dimension': stats.get('dimension', 1024), # Get dimension if available
+                'dimension': stats.get('dimension', 512), # Get dimension if available
                 'index_name': self.index_name
             }
         except Exception as e:
@@ -735,7 +733,7 @@ Answer:"""
             # Query with a dummy vector to get a sample of vectors
             # This is a workaround as Pinecone doesn't have a "list all" metadata API
             sample_results = self.index.query(
-                vector=[0.0] * 1024,  # Dummy vector
+                vector=[0.0] * 512,  # Dummy vector
                 top_k=1000,  # Get many results to find all documents
                 include_metadata=True
             )
