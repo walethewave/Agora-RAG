@@ -16,6 +16,7 @@ import uuid
 import time
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import List, Dict, Optional, Any
 import boto3
@@ -63,7 +64,8 @@ class SimplifiedRAG:
             
             # Model configurations
             self.embedding_model = "amazon.titan-embed-text-v2:0"  # Embedding model
-            self.chat_model = "anthropic.claude-3-5-sonnet-20240620-v1:0"  # LLM
+            self.chat_model = "arn:aws:bedrock:us-east-1:992382810653:inference-profile/us.anthropic.claude-sonnet-4-5-20250929-v1:0"  # LLM for answer synthesis
+            self.fast_model = "arn:aws:bedrock:us-east-1:992382810653:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0"  # Fast LLM for sub-queries
             
             # Tokenizer for chunking (matches Claude models)
             self.tokenizer = tiktoken.get_encoding("cl100k_base")
@@ -126,7 +128,7 @@ class SimplifiedRAG:
         while i < len(lines):
             line = lines[i].strip()
 
-            section_match = section_pattern.match(line)
+            section_match = section_pattern.match(line) 
             if section_match:
                 current_section = section_match.group(1).strip()
                 i += 1
@@ -452,6 +454,7 @@ class SimplifiedRAG:
         Use Claude to silently break a user question into 2 focused sub-queries
         for better retrieval coverage. Never exposed to the user.
         """
+        t0 = time.time()
         try:
             prompt = (
                 "Given the following user question, generate exactly 2 focused sub-queries "
@@ -472,21 +475,26 @@ class SimplifiedRAG:
                 "max_tokens": 200
             })
 
+            logger.info("[TIMING] Calling Bedrock for sub-query generation...")
             response = self.bedrock.invoke_model(
-                modelId=self.chat_model,
+                modelId=self.fast_model,
                 body=request_body,
                 contentType='application/json'
             )
 
             result = json.loads(response['body'].read())
             text = result['content'][0]['text'].strip()
+            # Strip markdown code fences if present (e.g. ```json ... ```)
+            json_match = re.search(r'\[.*?\]', text, re.DOTALL)
+            if json_match:
+                text = json_match.group(0)
             sub_queries = json.loads(text)
             if isinstance(sub_queries, list) and len(sub_queries) >= 2:
-                logger.info("Generated 2 sub-queries for retrieval.")
+                logger.info(f"[TIMING] Sub-query generation done in {time.time()-t0:.2f}s")
                 return sub_queries[:2]
 
         except Exception as e:
-            logger.warning(f"Sub-query generation failed, using original question: {e}")
+            logger.warning(f"[TIMING] Sub-query generation failed after {time.time()-t0:.2f}s: {e}")
 
         # Fallback: use original question for both slots
         return [question, question]
@@ -494,38 +502,40 @@ class SimplifiedRAG:
     def ask_questions(self, question: str) -> Dict[str, Any]:
         """
         Ask a question with RAG retrieval using sub-query decomposition.
-
-        Silently breaks the question into 2 focused sub-queries, retrieves chunks
-        for each independently, deduplicates, then synthesizes one clear answer.
-        Sub-queries are never exposed to the user.
         """
         top_k = 5
         start_time = time.time()
 
         try:
-            logger.info(f"Processing question: {question[:100]}...")
+            logger.info(f"[TIMING] ========== START ask_questions ==========")
+            logger.info(f"[TIMING] Question: {question[:100]}")
 
-            # Step 1: Silently generate 2 sub-queries
+            # Step 1: Sub-query generation
+            t1 = time.time()
             sub_queries = self._generate_sub_queries(question)
-            logger.info("Retrieving chunks for each sub-query independently...")
+            logger.info(f"[TIMING] Step 1 - Sub-query generation: {time.time()-t1:.2f}s")
 
-            # Step 2: Retrieve chunks for each sub-query independently
+            # Step 2: Embeddings + Pinecone retrieval — run both sub-queries in parallel
+            def retrieve(idx: int, sq: str):
+                t2 = time.time()
+                embedding = self._generate_embeddings([sq])[0]
+                logger.info(f"[TIMING] Step 2.{idx+1}a - Embedding sub-query {idx+1}: {time.time()-t2:.2f}s")
+                t3 = time.time()
+                results = self.index.query(vector=embedding, top_k=top_k, include_metadata=True)
+                logger.info(f"[TIMING] Step 2.{idx+1}b - Pinecone query {idx+1}: {time.time()-t3:.2f}s | hits: {len(results['matches'])}")
+                return results['matches']
+
+            t_retrieval = time.time()
             all_matches: Dict[str, Any] = {}
-            for sq in sub_queries:
-                sq_embedding = self._generate_embeddings([sq])[0]
-                search_results = self.index.query(
-                    vector=sq_embedding,
-                    top_k=top_k,
-                    include_metadata=True
-                )
-                for match in search_results['matches']:
-                    # Deduplicate by vector ID, keep highest score
-                    if match['id'] not in all_matches:
-                        all_matches[match['id']] = match
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = {executor.submit(retrieve, idx, sq): idx for idx, sq in enumerate(sub_queries)}
+                for future in as_completed(futures):
+                    for match in future.result():
+                        if match['id'] not in all_matches:
+                            all_matches[match['id']] = match
 
-            # Sort by relevance score descending
             unique_matches = sorted(all_matches.values(), key=lambda m: m['score'], reverse=True)
-            logger.info(f"Retrieved {len(unique_matches)} unique context chunks from both sub-queries.")
+            logger.info(f"[TIMING] Step 2 total - Parallel retrieval complete in {time.time()-t_retrieval:.2f}s | {len(unique_matches)} unique chunks")
 
             # Step 3: Build context and sources
             context_chunks = []
@@ -544,36 +554,33 @@ class SimplifiedRAG:
 
             context_text = "\n\n".join(context_chunks)
 
-            # Step 4: Synthesize one clear answer with Claude
-            prompt = f"""You are a helpful and friendly assistant having a natural conversation with a user. Your job is to answer their question using the information provided below.
+            # Step 4: Answer synthesis
+            prompt = f"""You are the Qorpy FAQ assistant — an expert on FIRS e-Invoicing, Qucoon, and the Qorpy platform. Answer the user's question clearly and directly using only the context provided.
 
-Context Information:
+Context:
 {context_text}
 
 User's Question: {question}
 
-Instructions:
-- Answer in a warm, conversational tone as if you're chatting with a friend
-- Use the context information above to provide accurate answers
-- If the context has everything needed, give a clear and helpful response
-- If the context is missing some details, be honest about it in a friendly way. You can say things like:
-  * "I don't have enough information about that right now, but here's what I do know..."
-  * "Hmm, I'm not seeing details on that specific part in my current information."
-  * "I wish I had more info on that for you! Based on what I have here..."
-- Keep your response concise but personable
-- Avoid robotic phrases like "based on the provided context" or "according to the information given"
-- Feel free to use natural conversational elements like "Great question!", "Let me help you with that", etc.
+Formatting rules (follow strictly):
+- Write in plain, confident prose — no filler phrases like "Great question!" or "Based on the context"
+- Keep answers short and scannable. Use bullet points or numbered lists when listing multiple items
+- Use **bold** for key terms, names, or important values
+- If the answer has a single clear fact, give it in 1-2 sentences — do not pad
+- If information is truly missing from the context, say so in one line: "I don't have details on that — contact support@qucoon.com"
+- Never start your reply with "I" as the first word
+- Do not repeat the question back to the user
 
-Your Response:
-"""
+Answer:"""
 
             request_body = json.dumps({
                 "anthropic_version": "bedrock-2023-05-31",
                 "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 1000
+                "max_tokens": 800
             })
 
-            logger.info("Generating answer with Claude 3.5 Sonnet...")
+            t4 = time.time()
+            logger.info("[TIMING] Step 4 - Calling Bedrock for answer synthesis...")
             response = self.bedrock.invoke_model(
                 modelId=self.chat_model,
                 body=request_body,
@@ -582,16 +589,17 @@ Your Response:
 
             result = json.loads(response['body'].read())
             answer = result['content'][0]['text'] if 'content' in result else result.get('completion', 'No answer generated')
+            logger.info(f"[TIMING] Step 4 - Answer synthesis done: {time.time()-t4:.2f}s")
 
-            query_time = time.time() - start_time
-            logger.info(f"Successfully answered question in {query_time:.2f}s")
+            total_time = time.time() - start_time
+            logger.info(f"[TIMING] ========== TOTAL: {total_time:.2f}s ==========")
 
             return {
                 'success': True,
                 'answer': answer,
                 'sources': sources,
                 'question': question,
-                'query_time_seconds': round(query_time, 2),
+                'query_time_seconds': round(total_time, 2),
                 'chunks_retrieved': len(context_chunks),
                 'metadata': {
                     'embedding_model': self.embedding_model,
@@ -611,6 +619,95 @@ Your Response:
                 'query_time_seconds': round(time.time() - start_time, 2)
             }
     
+
+    def ask_questions_stream(self, question: str):
+        """
+        Ask a question with RAG retrieval, streaming the answer token by token.
+        Sub-query decomposition + retrieval happen upfront, then the answer streams.
+        Yields raw text chunks from Bedrock's streaming API.
+        """
+        top_k = 5
+        start_time = time.time()
+
+        try:
+            logger.info(f"[TIMING] ========== START ask_questions_stream ==========")
+
+            # Step 1: Sub-query generation
+            t1 = time.time()
+            sub_queries = self._generate_sub_queries(question)
+            logger.info(f"[TIMING] Step 1 - Sub-query generation: {time.time()-t1:.2f}s")
+
+            # Step 2: Parallel retrieval
+            def retrieve(idx: int, sq: str):
+                embedding = self._generate_embeddings([sq])[0]
+                results = self.index.query(vector=embedding, top_k=top_k, include_metadata=True)
+                return results['matches']
+
+            t_retrieval = time.time()
+            all_matches: Dict[str, Any] = {}
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = {executor.submit(retrieve, idx, sq): idx for idx, sq in enumerate(sub_queries)}
+                for future in as_completed(futures):
+                    for match in future.result():
+                        if match['id'] not in all_matches:
+                            all_matches[match['id']] = match
+
+            unique_matches = sorted(all_matches.values(), key=lambda m: m['score'], reverse=True)
+            logger.info(f"[TIMING] Step 2 - Parallel retrieval: {time.time()-t_retrieval:.2f}s | {len(unique_matches)} unique chunks")
+
+            # Step 3: Build context
+            context_text = "\n\n".join(m['metadata']['text'] for m in unique_matches)
+
+            # Step 4: Stream answer synthesis
+            prompt = f"""You are the Qorpy FAQ assistant — an expert on FIRS e-Invoicing, Qucoon, and the Qorpy platform. Answer the user's question clearly and directly using only the context provided.
+
+Context:
+{context_text}
+
+User's Question: {question}
+
+Formatting rules (follow strictly):
+- Write in plain, confident prose — no filler phrases like "Great question!" or "Based on the context"
+- Keep answers short and scannable. Use bullet points or numbered lists when listing multiple items
+- Use **bold** for key terms, names, or important values
+- If the answer has a single clear fact, give it in 1-2 sentences — do not pad
+- If information is truly missing from the context, say so in one line: "I don't have details on that — contact support@qucoon.com"
+- Never start your reply with "I" as the first word
+- Do not repeat the question back to the user
+
+Answer:"""
+
+            request_body = json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 800
+            })
+
+            t4 = time.time()
+            logger.info("[TIMING] Step 4 - Starting streaming synthesis...")
+            response = self.bedrock.invoke_model_with_response_stream(
+                modelId=self.chat_model,
+                body=request_body,
+                contentType='application/json'
+            )
+
+            stream = response.get('body')
+            if stream:
+                for event in stream:
+                    chunk = event.get('chunk')
+                    if chunk:
+                        chunk_data = json.loads(chunk.get('bytes').decode())
+                        if chunk_data.get('type') == 'content_block_delta':
+                            delta = chunk_data.get('delta', {})
+                            if delta.get('type') == 'text_delta':
+                                yield delta.get('text', '')
+
+            logger.info(f"[TIMING] Step 4 - Streaming done: {time.time()-t4:.2f}s")
+            logger.info(f"[TIMING] ========== STREAM TOTAL: {time.time()-start_time:.2f}s ==========")
+
+        except Exception as e:
+            logger.error(f"FAILED to stream answer for '{question[:50]}': {e}", exc_info=True)
+            yield f"\n\n⚠️ Something went wrong. Please try again."
 
     # =================
     # UTILITY FUNCTIONS

@@ -14,12 +14,13 @@ Direct PDF upload - no S3 dependency.
 # --- Standard Library Imports ---
 import os
 import uuid
+import json
 import logging
 from typing import Optional
 
 # --- Third-Party Imports ---
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, BackgroundTasks
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from mangum import Mangum
 
 # --- Local Application Imports ---
@@ -322,6 +323,37 @@ async def task_status(task_id: str):
             "message": task["message"],
         }
     }
+
+
+@app.post("/ask-question-stream")
+async def ask_question_stream(request: QuestionRequest):
+    """
+    Stream an answer token by token using Server-Sent Events (SSE).
+    The client receives `data: {"text": "..."}\n\n` chunks, then `data: [DONE]\n\n`.
+    """
+    if not rag_system:
+        async def error_gen():
+            yield f"data: {json.dumps({'text': 'RAG system not initialized'})}\n\n"
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(error_gen(), media_type="text/event-stream")
+
+    def generate():
+        try:
+            logger.info(f"Streaming question: '{request.question[:50]}...'")
+            for text_chunk in rag_system.ask_questions_stream(question=request.question):
+                if text_chunk:
+                    yield f"data: {json.dumps({'text': text_chunk})}\n\n"
+        except Exception as e:
+            logger.error(f"Stream error: {e}")
+            yield f"data: {json.dumps({'text': f'⚠️ Error: {str(e)}'})}\n\n"
+        finally:
+            yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    )
 
 
 @app.post("/ask-question", response_model=response)
