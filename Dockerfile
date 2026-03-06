@@ -1,4 +1,4 @@
-FROM public.ecr.aws/lambda/python:3.10
+FROM public.ecr.aws/lambda/python:3.12
 
 # Set working directory to Lambda task root
 WORKDIR ${LAMBDA_TASK_ROOT}
@@ -7,7 +7,7 @@ WORKDIR ${LAMBDA_TASK_ROOT}
 COPY requirements.txt .
 
 # Install dependencies
-RUN pip install --no-cache-dir -r requirements.txt --target ${LAMBDA_TASK_ROOT}
+RUN pip install --no-cache-dir --prefer-binary -r requirements.txt --target ${LAMBDA_TASK_ROOT}
 
 # Copy required files
 COPY . .
