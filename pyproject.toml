@@ -8,6 +8,7 @@ dependencies = [
     "fastapi==0.115.14",
     "mangum==0.19.0",
     "numpy>=1.26.0",
+    "pandas>=2.2.0",
     "pinecone-client==3.2.2",
     "pydantic==2.11.4",
     "pydantic-core==2.33.2",
@@ -18,7 +19,7 @@ dependencies = [
     "pyyaml>=6.0.3",
     "redis>=7.2.1",
     "requests>=2.32.5",
-    "streamlit>=1.45.0",
+    "streamlit>=1.9.0",
     "tiktoken>=0.7.0",
     "uvicorn==0.35.0",
 ]
