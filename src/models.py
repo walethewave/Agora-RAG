@@ -1,64 +1,33 @@
-"""
-Pydantic Models for API Requests/Responses
+"""Pydantic models for the FastAPI application.
 
-This module defines the data structures used for validating
-request and response bodies in the FastAPI application.
+Only the request and response shapes used by the live endpoints are kept here.
 """
 
-from typing import Any, Optional, Union
-from pydantic import BaseModel, Field 
+from __future__ import annotations
+from typing import Any, Optional
+from pydantic import BaseModel, Field
 
-# Request/Response models
+
 class QuestionRequest(BaseModel):
-    """
-    Data model for the '/ask-question' endpoint.
-    
-    This model is used by FastAPI to validate the incoming request body.
-    It ensures that the JSON payload has a required 'question' field
-    and that its value is a string.
-    """
-    entity_id: str  # Tenant namespace — required on every request
-    question: str  # The user's question to be sent to the RAG system.
-    session_id: Optional[str] = None  # Session ID for conversation history (Redis)
+    """Request body for the chat question endpoints."""
+
+    entity_id: str = Field(..., description="Pinecone namespace for the request")
+    question: str = Field(..., min_length=1, description="User question to answer")
+    session_id: Optional[str] = Field(
+        default=None,
+        description="Upstash session identifier used for short-term memory",
+    )
 
 
 class CreateSessionRequest(BaseModel):
-    """Data model for the '/create-session' endpoint."""
-    entity_id: str  # Tenant namespace — required to scope the session
+    """Request body for creating a new chat session."""
+
+    entity_id: str = Field(..., description="Pinecone namespace for the session")
 
 
-class AddQARequest(BaseModel):
-    """Data model for adding a single Q&A pair."""
-    entity_id: str
-    question: str
-    answer: str
-    category: Optional[str] = "General"
-    section: Optional[str] = "General"
+class APIResponse(BaseModel):
+    """Standard response envelope returned by the API."""
 
-
-class SearchQARequest(BaseModel):
-    """Data model for searching Q&A pairs."""
-    entity_id: str
-    query: str
-    top_k: Optional[int] = 3
-
-
-class UpdateQARequest(BaseModel):
-    """Data model for updating an existing Q&A pair."""
-    entity_id: str
-    vector_id: str
-    new_answer: str
-    new_question: Optional[str] = None
-    
-
-class BaseResponse(BaseModel):
-    """
-    Standard response schema for all API endpoints.
-    """
-    responseCode: str = Field(..., description="Response code: '00' for success, '01' for failure")
-    responseMessage: str = Field(..., description="Detailed message about the operation result")
-    
-class SuccessResponse(BaseResponse):
-    data: Optional[Any] = Field(None, description="Optional data payload (depends on endpoint)")
-
-response = Union[BaseResponse, SuccessResponse]
+    responseCode: str = Field(..., description="'00' means success, '01' means failure")
+    responseMessage: str = Field(..., description="Human-readable status message")
+    data: Optional[Any] = Field(default=None, description="Optional payload for the caller")

@@ -1,136 +1,76 @@
 """
-Simplified RAG System - Core Functions
-=======================================
-1. Process uploaded PDF (PDF bytes -> Q&A Chunks -> Vectors -> Pinecone)
+Simplified RAG System - Google Gemini Integration
+==================================================
+1. Process uploaded PDF (PDF bytes -> Recursive Chunks -> Gemini Embeddings -> Pinecone)
 2. Add document to existing collection
 3. Replace vectors for a specific document
-4. Ask questions with RAG retrieval (sub-query decomposition)
+4. Ask questions with RAG retrieval (sub-query decomposition via Gemini)
 
 Direct PDF upload via FastAPI - no S3 dependency.
-Chunking strategy: one chunk per Q&A pair.
+Chunking strategy: Recursive with 1200-token target and 20% overlap (semantic-aware).
+Embedding model: Google Gemini Embedding 2 (1536-dimensional).
+LLM: Google Gemini 2.5 Flash for answer synthesis.
 """
 
 import os
 import re
 import uuid
 import time
-import json
 import logging
-import yaml
-import redis
+import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from typing import List, Dict, Optional, Any
-import boto3
+from typing import List, Dict, Optional, Any, Tuple
 import tiktoken
 from io import BytesIO
 from pinecone import Pinecone, ServerlessSpec
-from PyPDF2 import PdfReader
-from dotenv import load_dotenv, find_dotenv
+import pdfplumber
 from fastapi import HTTPException
-
+import pathlib
+import yaml
+from src.chat_engine import GeminiChatClient
+from src.utils import ConversationMemory, load_project_env, read_env_value
 
 logger = logging.getLogger(__name__)
 
-import pathlib
+# ===========================
+# CONSTANTS
+# ===========================
+CHUNK_TARGET_TOKENS = 500
+CHUNK_OVERLAP_PCT = 0.20
+CHUNK_OVERLAP_TOKENS = int(CHUNK_TARGET_TOKENS * CHUNK_OVERLAP_PCT)
+EMBEDDING_DIMENSION = 1536
+GEMINI_EMBEDDING_MODEL = "models/gemini-embedding-001"
+GEMINI_TEXT_MODEL = "models/gemini-2.5-flash"
+GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
-# Always load from the .env file sitting next to this file's parent directory
-_env_file = pathlib.Path(__file__).resolve().parent.parent / ".env"
-load_dotenv(_env_file, override=True)
-
-# Force-read critical values directly from .env to bypass persistent shell env vars
-def _read_env_value(key: str) -> str | None:
-    """Read a value directly from the .env file, bypassing os.environ."""
-    if _env_file.exists():
-        for line in _env_file.read_text().splitlines():
-            line = line.strip()
-            if line.startswith("#") or "=" not in line:
-                continue
-            k, _, v = line.partition("=")
-            if k.strip() == key:
-                v = v.strip().strip('"').strip("'")  # strip surrounding quotes
-                return v if v else None
-    return None
-
-_pinecone_index_from_file = _read_env_value("PINECONE_INDEX_NAME")
-if _pinecone_index_from_file:
-    os.environ["PINECONE_INDEX_NAME"] = _pinecone_index_from_file
-
-_redis_url_from_file = _read_env_value("REDIS_URL")
-if _redis_url_from_file:
-    os.environ["REDIS_URL"] = _redis_url_from_file
-    logging.getLogger(__name__).info(f"[CONFIG] REDIS_URL loaded from .env (length={len(_redis_url_from_file)})")
-else:
-    logging.getLogger(__name__).warning("[CONFIG] REDIS_URL not found in .env file")
-
-
-class ConversationMemory:
-    """Manages per-session conversation history in Upstash Redis."""
-
-    TTL = 1800        # 30 minutes in seconds
-    MAX_MESSAGES = 5  # last 5 user+assistant pairs stored
-
-    def __init__(self, redis_url: str):
-        self.client = redis.from_url(redis_url, decode_responses=True)
-        logger.info("[CONFIG] Connected to Upstash Redis")
-
-    def _key(self, session_id: str) -> str:
-        return f"session:{session_id}:history"
-
-    def get_history(self, session_id: str) -> str:
-        """Return last MAX_MESSAGES Q&A pairs formatted as conversational context."""
-        try:
-            raw = self.client.lrange(self._key(session_id), -(self.MAX_MESSAGES * 2), -1)
-            messages = [json.loads(m) for m in raw]
-            if not messages:
-                return "No previous conversation."
-            lines = []
-            for m in messages:
-                role = "User" if m["role"] == "user" else "Qorpy"
-                lines.append(f"{role}: {m['content']}")
-            return "\n".join(lines)
-        except Exception as e:
-            logger.warning(f"[REDIS] Failed to get history for session {session_id}: {e}")
-            return "No previous conversation."
-
-    def save(self, session_id: str, user_msg: str, assistant_msg: str):
-        """Append user + assistant messages, trim to window, refresh TTL."""
-        try:
-            key = self._key(session_id)
-            pipe = self.client.pipeline()
-            pipe.rpush(key, json.dumps({"role": "user",      "content": user_msg}))
-            pipe.rpush(key, json.dumps({"role": "assistant", "content": assistant_msg}))
-            pipe.ltrim(key, -(self.MAX_MESSAGES * 2), -1)  # keep last N pairs
-            pipe.expire(key, self.TTL)
-            pipe.execute()
-            logger.info(f"[REDIS] Saved conversation turn for session {session_id}")
-        except Exception as e:
-            logger.warning(f"[REDIS] Failed to save history for session {session_id}: {e}")
+# Load .env once at module level via utils
+_env_file = load_project_env()
 
 
 class SimplifiedRAG:
-    """Simplified RAG system with 4 core functions for backend integration"""
+    """Simplified RAG system using Google Gemini API and Pinecone for retrieval."""
         
     def __init__(self):
-        """Initialize the RAG system with AWS Bedrock and Pinecone"""
+        """Initialize the RAG system with Google Gemini API and Pinecone."""
         try:
-            # AWS Bedrock setup
-            self.bedrock = boto3.client(
-                'bedrock-runtime',
-                region_name='us-east-1',
-            )
+            # Google Gemini API setup
+            self.gemini_api_key = os.getenv('GEMINI_API_KEY')
+            if not self.gemini_api_key:
+                raise ValueError("GEMINI_API_KEY environment variable not set")
+            logger.info("[CONFIG] Google Gemini API initialized")
 
             # Pinecone setup
             pc = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))
-            self.index_name = os.getenv('PINECONE_INDEX_NAME')
+            self.index_name = read_env_value("PINECONE_INDEX_NAME", _env_file) or os.getenv('PINECONE_INDEX_NAME')
             logger.info(f"[CONFIG] Pinecone index: {self.index_name!r}")
             
-            # Create index if it doesn't exist
+            # Create index if it doesn't exist (1536-dimensional for Gemini Embedding 2)
             if self.index_name not in [index.name for index in pc.list_indexes()]:
-                logger.info(f"Creating new Pinecone index: {self.index_name}")
+                logger.info(f"Creating new Pinecone index: {self.index_name} with dimension {EMBEDDING_DIMENSION}")
                 pc.create_index(
                     name=self.index_name,
-                    dimension=512,  # Titan v2 embedding dimension
+                    dimension=EMBEDDING_DIMENSION,
                     metric='cosine',
                     spec=ServerlessSpec(cloud='aws', region='us-east-1')
                 )
@@ -139,21 +79,30 @@ class SimplifiedRAG:
             self.index = pc.Index(self.index_name)
             
             # Model configurations
-            self.embedding_model = "amazon.titan-embed-text-v2:0"  # Embedding model (512-dim)
-            self.chat_model = "amazon.nova-pro-v1:0"  # LLM for answer synthesis
-            self.fast_model = "amazon.nova-lite-v1:0"  # Fast LLM for sub-queries
+            self.embedding_model = GEMINI_EMBEDDING_MODEL
+            self.text_model = GEMINI_TEXT_MODEL
+            self.chat_client = GeminiChatClient(
+                api_key=self.gemini_api_key,
+                api_base=GEMINI_API_BASE,
+                text_model=self.text_model,
+            )
+            logger.info(f"[CONFIG] Models: embedding={self.embedding_model}, text={self.text_model}")
 
-            # Load prompt templates from prompt.yaml
-            _prompt_file = pathlib.Path(__file__).resolve().parent.parent / "prompt.yaml"
+            # Load prompt templates from YAML file
+            _prompt_file = pathlib.Path(__file__).resolve().parent / "prompts.yaml"
+            if not _prompt_file.exists():
+                raise FileNotFoundError(f"Prompts file not found: {_prompt_file}")
+            
             with open(_prompt_file, "r") as f:
-                _prompts = yaml.safe_load(f)
-            self.system_prompt = _prompts["system"].strip()
-            self.user_template = _prompts["user_template"].strip()
-            self.sub_query_template = _prompts["sub_query"].strip()
-            logger.info("[CONFIG] Loaded prompt templates from prompt.yaml")
+                prompts_config = yaml.safe_load(f)
+
+            self.system_prompt = prompts_config.get("system_prompt", "").strip()
+            self.user_template = prompts_config.get("user_template", "").strip()
+            self.sub_query_template = prompts_config.get("sub_query_template", "").strip()
+            logger.info("[CONFIG] Loaded prompt templates from src/prompts.yaml")
 
             # Redis conversation memory (Upstash)
-            _redis_url = _redis_url_from_file or os.getenv("REDIS_URL")
+            _redis_url = read_env_value("REDIS_URL", _env_file) or os.getenv("REDIS_URL")
             if _redis_url:
                 self.memory = ConversationMemory(_redis_url)
             else:
@@ -173,162 +122,218 @@ class SimplifiedRAG:
     # =========================
 
     def _extract_pdf_text(self, file_bytes: bytes) -> str:
-        """Extract all text from a PDF and return as a single string."""
+        """Extract all text from a PDF using pdfplumber (handles complex layouts)."""
         try:
-            reader = PdfReader(BytesIO(file_bytes))
             full_text = ""
-            for page in reader.pages:
-                text = page.extract_text()
-                if text:
-                    full_text += text + "\n"
-            logger.info(f"Extracted text from {len(reader.pages)} PDF pages.")
+            with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+                for page in pdf.pages:
+                    text = page.extract_text()
+                    if text:
+                        full_text += text + "\n"
+                page_count = len(pdf.pages)
+            logger.info(f"Extracted text from {page_count} PDF pages ({len(full_text)} chars).")
             return full_text.strip()
         except Exception as e:
             logger.error(f"Failed to extract PDF text: {e}", exc_info=True)
             raise Exception(f"Failed to extract PDF text: {str(e)}")
 
+    def _extract_text(self, file_bytes: bytes, filename: str) -> str:
+        """Extract text from PDF or TXT file."""
+        if filename.lower().endswith('.txt'):
+            try:
+                text = file_bytes.decode('utf-8')
+                logger.info(f"Extracted {len(text)} chars from TXT file.")
+                return text.strip()
+            except Exception as e:
+                raise Exception(f"Failed to read TXT file: {str(e)}")
+        return self._extract_pdf_text(file_bytes)
+
     def _create_qa_chunks(self, full_text: str) -> List[Dict[str, Any]]:
         """
-        Parse PDF text into one chunk per Q&A pair.
+        Recursive text chunker — works on any prose document (legal acts, FAQs, reports).
 
-        Expected format:
-            [CATEGORY: SomeName]
-            Q: <question>
-            A: <answer>
-
-        Normalizes the extracted text first so that Q:, A:, [CATEGORY:,
-        and SECTION markers always appear at the start of a line, regardless
-        of how PyPDF2 joined them during extraction.
+        Strategy:
+        1. Try to split on section boundaries first (preserves legal structure)
+        2. Fall back to paragraph breaks, then sentences, then words
+        3. Each chunk targets CHUNK_TARGET_TOKENS (1200) with CHUNK_OVERLAP_TOKENS (240)
+           carried forward from the tail of the previous chunk
         """
+        # Separators tried in order — most semantic to least
+        SEPARATORS = [
+            r'\n(?=\d+\.\s)',          # numbered section: "6. Unlawful access"
+            r'\n(?=PART\s+[IVXLC]+)',  # PART I, PART II …
+            r'\n\n+',                  # paragraph break
+            r'\n',                     # single newline
+            r'(?<=[.!?])\s+',          # sentence boundary
+        ]
+
+        def _split(text: str) -> List[str]:
+            """Split text using the first separator that produces >1 piece."""
+            for sep in SEPARATORS:
+                parts = [p.strip() for p in re.split(sep, text) if p.strip()]
+                if len(parts) > 1:
+                    return parts
+            # Last resort: split on whitespace
+            return text.split()
+
+        def _token_len(text: str) -> int:
+            return len(self.tokenizer.encode(text))
+
+        # --- detect section heading for metadata ---
+        section_pattern = re.compile(
+            r'^(?:PART\s+[IVXLC]+.*|\d+\.\s+.{3,80})$', re.MULTILINE
+        )
+
+        def _section_for(text: str) -> str:
+            m = section_pattern.search(text)
+            return m.group(0).strip()[:80] if m else "General"
+
+        # --- recursive merge: combine small pieces into target-sized chunks ---
+        def _merge(pieces: List[str]) -> List[str]:
+            """
+            Walk through pieces, accumulating tokens until we hit the target.
+            When a single piece already exceeds the target, recurse into it.
+            """
+            result: List[str] = []
+            current = ""
+
+            for piece in pieces:
+                if _token_len(piece) > CHUNK_TARGET_TOKENS:
+                    # Piece is too big on its own — recurse
+                    if current:
+                        result.append(current)
+                        current = ""
+                    result.extend(_merge(_split(piece)))
+                    continue
+
+                candidate = (current + "\n" + piece).strip() if current else piece
+                if _token_len(candidate) <= CHUNK_TARGET_TOKENS:
+                    current = candidate
+                else:
+                    if current:
+                        result.append(current)
+                    current = piece
+
+            if current:
+                result.append(current)
+            return result
+
+        raw_pieces = _split(full_text)
+        merged = _merge(raw_pieces)
+
+        # --- apply 20% overlap between adjacent chunks ---
         chunks: List[Dict[str, Any]] = []
-        section_pattern = re.compile(r'SECTION\s+\d+\s*[\u2014\u2013\-]\s*(.+)')
-        category_pattern = re.compile(r'\[CATEGORY:\s*(.+?)\]')
-
-        # --- Normalization: force key markers onto their own lines ---
-        # Handles PDFs where PyPDF2 joins "...text Q: next question" on one line
-        full_text = re.sub(r'(?<!\n)(Q:\s)', r'\n\1', full_text)
-        full_text = re.sub(r'(?<!\n)(A:\s)', r'\n\1', full_text)
-        full_text = re.sub(r'(?<!\n)(\[CATEGORY:)', r'\n\1', full_text)
-        full_text = re.sub(r'(?<!\n)(SECTION\s+\d+)', r'\n\1', full_text)
-
-        current_section = "General"
-        current_category = "General"
-
-        lines = full_text.split('\n')
-        i = 0
-        chunk_index = 0
-
-        while i < len(lines):
-            line = lines[i].strip()
-
-            section_match = section_pattern.match(line) 
-            if section_match:
-                current_section = section_match.group(1).strip()
-                i += 1
-                continue
-
-            category_match = category_pattern.match(line)
-            if category_match:
-                current_category = category_match.group(1).strip()
-                i += 1
-                continue
-
-            if line.startswith('Q:'):
-                question_text = line[2:].strip()
-                i += 1
-                while i < len(lines):
-                    l = lines[i].strip()
-                    if l.startswith('A:') or l.startswith('Q:') or l.startswith('[CATEGORY') or section_pattern.match(l):
+        for idx, text in enumerate(merged):
+            # carry the last CHUNK_OVERLAP_TOKENS tokens from previous chunk
+            if idx > 0:
+                prev_words = merged[idx - 1].split()
+                overlap = ""
+                for word in reversed(prev_words):
+                    candidate = word + " " + overlap
+                    if _token_len(candidate) > CHUNK_OVERLAP_TOKENS:
                         break
-                    question_text += ' ' + l
-                    i += 1
+                    overlap = candidate
+                if overlap.strip():
+                    combined = (overlap.strip() + "\n" + text).strip()
+                    # if adding overlap pushes over the limit, trim the tail of text
+                    if _token_len(combined) > CHUNK_TARGET_TOKENS:
+                        words = combined.split()
+                        while words and _token_len(" ".join(words)) > CHUNK_TARGET_TOKENS:
+                            words.pop()
+                        combined = " ".join(words)
+                    text = combined
 
-                answer_text = ""
-                if i < len(lines) and lines[i].strip().startswith('A:'):
-                    answer_text = lines[i].strip()[2:].strip()
-                    i += 1
-                    while i < len(lines):
-                        l = lines[i].strip()
-                        if l.startswith('Q:') or l.startswith('[CATEGORY') or section_pattern.match(l):
-                            break
-                        if l == '':
-                            j = i + 1
-                            while j < len(lines) and lines[j].strip() == '':
-                                j += 1
-                            if j >= len(lines) or lines[j].strip().startswith('Q:') or lines[j].strip().startswith('[CATEGORY') or section_pattern.match(lines[j].strip()):
-                                break
-                        answer_text += ' ' + l
-                        i += 1
+            token_count = _token_len(text)
+            chunks.append({
+                'text': text,
+                'section': _section_for(text),
+                'category': 'General',
+                'token_count': token_count,
+                'char_count': len(text),
+                'chunk_index': idx,
+                # keep these keys so Pinecone metadata stays consistent
+                'question': '',
+                'answer': '',
+            })
 
-                chunk_text = f"Q: {question_text.strip()}\nA: {answer_text.strip()}"
-                tokens = self.tokenizer.encode(chunk_text)
-
-                chunks.append({
-                    'text': chunk_text,
-                    'question': question_text.strip(),
-                    'answer': answer_text.strip(),
-                    'section': current_section,
-                    'category': current_category,
-                    'token_count': len(tokens),
-                    'char_count': len(chunk_text),
-                    'chunk_index': chunk_index,
-                })
-                chunk_index += 1
-            else:
-                i += 1
-
-        logger.info(f"Created {len(chunks)} Q&A chunks from PDF text.")
+        logger.info(
+            f"Created {len(chunks)} recursive chunks "
+            f"(target={CHUNK_TARGET_TOKENS} tokens, overlap={CHUNK_OVERLAP_PCT*100:.0f}%)"
+        )
         return chunks
 
 
-    def _generate_embeddings(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings using AWS Bedrock Titan"""
-        embeddings = []
-        
-        # Iterate over each text chunk
-        for text in texts:
+    def _embed_single(self, text: str, idx: int, total: int) -> List[float]:
+        """Embed one text with 3 retries. Raises on all failures."""
+        url = f"{GEMINI_API_BASE}/{GEMINI_EMBEDDING_MODEL}:embedContent?key={self.gemini_api_key}"
+        payload = {
+            "model": GEMINI_EMBEDDING_MODEL,
+            "content": {"parts": [{"text": text}]},
+            "outputDimensionality": EMBEDDING_DIMENSION,
+        }
+        for attempt in range(1, 4):
             try:
-                # Format the request body for Bedrock Titan (512-dim output)
-                request_body = json.dumps({"inputText": text, "dimensions": 512, "normalize": True})
-                
-                # Invoke the Bedrock model
-                response = self.bedrock.invoke_model(
-                    modelId=self.embedding_model,
-                    body=request_body,
-                    contentType='application/json'
-                )
-                
-                # Parse the response
-                result = json.loads(response['body'].read())
-                # Append the resulting embedding vector
-                embeddings.append(result['embedding'])
-                
-            except Exception as e:
-                # Log a warning and append a zero vector as a fallback
-                logger.warning(f"Failed to generate embedding for text chunk: {str(e)}")
-                # Use zero vector as fallback to avoid dimension mismatch
-                embeddings.append([0.0] * 512)
-        
-        logger.info(f"Generated {len(embeddings)} embeddings.")
+                response = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=30)
+                if response.status_code == 429:
+                    wait = 5 * attempt
+                    logger.warning(f"[EMBEDDING {idx}/{total}] Rate limited — waiting {wait}s (attempt {attempt})")
+                    time.sleep(wait)
+                    continue
+                if response.status_code != 200:
+                    raise Exception(f"Gemini API error {response.status_code}: {response.text[:200]}")
+                embedding = response.json().get('embedding', {}).get('values', [])
+                if len(embedding) != EMBEDDING_DIMENSION:
+                    raise Exception(f"Wrong dimension: {len(embedding)}")
+                return embedding
+            except requests.exceptions.Timeout:
+                logger.warning(f"[EMBEDDING {idx}/{total}] Timeout (attempt {attempt})")
+                if attempt == 3:
+                    raise Exception(f"Embedding timed out after 3 attempts")
+                time.sleep(3 * attempt)
+        raise Exception(f"Embedding failed after 3 attempts")
+
+    def _generate_embeddings(self, texts: List[str]) -> List[List[float]]:
+        """Embed all texts, raising immediately if any chunk fails."""
+        embeddings = []
+        for i, text in enumerate(texts):
+            embedding = self._embed_single(text, i + 1, len(texts))
+            embeddings.append(embedding)
+            logger.info(f"[EMBEDDING {i+1}/{len(texts)}] OK ({EMBEDDING_DIMENSION}D)")
+        logger.info(f"Generated {len(embeddings)} embeddings ({EMBEDDING_DIMENSION}D)")
         return embeddings
     
     def _upload_to_pinecone(self, chunks: List[Dict], embeddings: List[List[float]], 
                             document_id: str, filename: str, namespace: str = "") -> Dict[str, Any]:
-        """Upload chunks and embeddings to Pinecone with rich metadata"""
+        """
+        Upload chunks and 1536-dimensional embeddings to Pinecone with rich metadata.
+        
+        Args:
+            chunks: List of chunk dictionaries with text, section, category, etc.
+            embeddings: List of 1536-dimensional embedding vectors
+            document_id: Unique identifier for the document
+            filename: Original filename
+            namespace: Pinecone namespace for multi-tenancy
+            
+        Returns:
+            Dictionary with upload statistics
+            
+        Raises:
+            Exception: If Pinecone upload fails
+        """
         try:
             vectors = []
-            timestamp = datetime.now().isoformat()  # Get current timestamp
+            timestamp = datetime.now().isoformat()
             
-            # Prepare vectors for upload
+            # Prepare vectors for upload with metadata
             for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-                vector_id = f"{document_id}_chunk_{i}"  # Create a unique ID for each chunk
+                vector_id = f"{document_id}_chunk_{i}"
                 
-                # Create a rich metadata object
+                # Rich metadata for retrieval and context
                 metadata = {
                     'document_id': document_id,
                     'filename': filename,
-                    'section': chunk.get('section', ''),
-                    'category': chunk.get('category', ''),
+                    'section': chunk.get('section', 'General'),
+                    'category': chunk.get('category', 'General'),
                     'question': chunk.get('question', ''),
                     'answer': chunk.get('answer', ''),
                     'chunk_index': chunk['chunk_index'],
@@ -336,17 +341,17 @@ class SimplifiedRAG:
                     'token_count': chunk['token_count'],
                     'char_count': chunk['char_count'],
                     'created_at': timestamp,
-                    'chunk_type': 'qa_pair',
+                    'chunk_type': 'qa_recursive',  # New type to indicate recursive chunking
+                    'embedding_dimension': EMBEDDING_DIMENSION,
                 }
                 
-                # Append the final vector object
                 vectors.append({
                     'id': vector_id,
                     'values': embedding,
                     'metadata': metadata
                 })
             
-            # Upload in batches for efficiency and reliability
+            # Upload in batches for efficiency
             batch_size = 100
             total_uploaded = 0
             
@@ -354,20 +359,24 @@ class SimplifiedRAG:
             
             for i in range(0, len(vectors), batch_size):
                 batch = vectors[i:i + batch_size]
-                self.index.upsert(vectors=batch, namespace=namespace)  # Upsert batch to Pinecone
-                total_uploaded += len(batch)
+                try:
+                    self.index.upsert(vectors=batch, namespace=namespace)
+                    total_uploaded += len(batch)
+                except Exception as e:
+                    logger.error(f"Batch upload failed (vectors {i}-{i+len(batch)}): {e}")
+                    raise
             
-            logger.info(f"Successfully uploaded {total_uploaded} vectors to Pinecone.")
+            logger.info(f"Successfully uploaded {total_uploaded} vectors to Pinecone (dim={EMBEDDING_DIMENSION})")
             
-            # Return a summary of the upload
             return {
                 'vectors_uploaded': total_uploaded,
                 'document_id': document_id,
                 'timestamp': timestamp
             }
         except Exception as e:
-            logger.error(f"Failed to upload vectors to Pinecone: {e}", exc_info=True)
-            raise Exception(f"Pinecone upload failed: {str(e)}") # Propagate error
+            error_msg = f"Pinecone upload failed: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            raise Exception(error_msg)
     
     # =========================
     # CORE FUNCTIONS
@@ -375,8 +384,17 @@ class SimplifiedRAG:
 
     def process_document(self, file_bytes: bytes, filename: str, namespace: str = "") -> Dict[str, Any]:
         """
-        Complete PDF Processing Pipeline (from bytes).
-        PDF bytes -> Q&A Chunks -> Embeddings -> Pinecone
+        Complete PDF Processing Pipeline (recursive chunking + Gemini embeddings + Pinecone upload).
+        
+        PDF bytes → Text Extraction → Recursive Chunks → Gemini Embeddings → Pinecone
+        
+        Args:
+            file_bytes: Raw PDF file bytes
+            filename: Original filename for metadata
+            namespace: Pinecone namespace for multi-tenancy
+            
+        Returns:
+            Dictionary with processing statistics and results
         """
         start_time = time.time()
 
@@ -384,20 +402,20 @@ class SimplifiedRAG:
             document_id = str(uuid.uuid4())
             logger.info(f"Processing document: {filename} (ID: {document_id})")
 
-            # Step 1: Extract text
-            full_text = self._extract_pdf_text(file_bytes)
+            # Step 1: Extract text from PDF or TXT
+            full_text = self._extract_text(file_bytes, filename)
             if not full_text:
                 raise Exception("PDF contained no extractable text.")
 
-            # Step 2: Create Q&A chunks
-            logger.info("Parsing Q&A chunks...")
+            # Step 2: Create recursive chunks with overlap
+            logger.info(f"Creating recursive chunks (target={CHUNK_TARGET_TOKENS} tokens, overlap={CHUNK_OVERLAP_PCT*100}%)")
             chunks = self._create_qa_chunks(full_text)
             total_chunks = len(chunks)
             if total_chunks == 0:
-                raise Exception("No Q&A pairs found in the PDF. Ensure the format uses 'Q:' and 'A:' prefixes.")
+                raise Exception("No text content found in the PDF. Ensure the file contains extractable text.")
 
-            # Step 3: Generate embeddings
-            logger.info("Generating embeddings...")
+            # Step 3: Generate Gemini embeddings (1536-dimensional)
+            logger.info("Generating Gemini embeddings...")
             chunk_texts = [chunk['text'] for chunk in chunks]
             embeddings = self._generate_embeddings(chunk_texts)
 
@@ -413,18 +431,21 @@ class SimplifiedRAG:
                 'document_id': document_id,
                 'filename': filename,
                 'processing_time_seconds': round(processing_time, 2),
-                'total_qa_pairs': total_chunks,
+                'total_chunks': total_chunks,
                 'total_tokens': total_tokens,
                 'pinecone_vectors_uploaded': upload_result['vectors_uploaded'],
                 'created_at': upload_result['timestamp'],
                 'metadata': {
                     'embedding_model': self.embedding_model,
+                    'embedding_dimension': EMBEDDING_DIMENSION,
+                    'chunking_strategy': 'recursive_with_overlap',
+                    'chunk_target_tokens': CHUNK_TARGET_TOKENS,
+                    'chunk_overlap_pct': CHUNK_OVERLAP_PCT,
                     'index_name': self.index_name,
-                    'chunking_strategy': 'qa_pair',
                 }
             }
 
-            logger.info(f"Document processed in {processing_time:.2f}s - {total_chunks} Q&A pairs uploaded.")
+            logger.info(f"Document processed in {processing_time:.2f}s - {total_chunks} recursive chunks uploaded.")
             return result
 
         except Exception as e:
@@ -549,63 +570,39 @@ class SimplifiedRAG:
                 }
             }
     
-    def _generate_sub_queries(self, question: str) -> List[str]:
-        """
-        Dynamically decompose a user question into 1-5 sub-queries using only
-        the exact words from the original question — no rephrasing or added context.
-        """
-        t0 = time.time()
-        try:
-            prompt = self.sub_query_template.format(user_query=question)
-
-            request_body = json.dumps({
-                "messages": [{"role": "user", "content": [{"text": prompt}]}],
-                "inferenceConfig": {"maxTokens": 200}
-            })
-
-            logger.info("[TIMING] Calling Bedrock for sub-query generation...")
-            response = self.bedrock.invoke_model(
-                modelId=self.fast_model,
-                body=request_body,
-                contentType='application/json'
-            )
-
-            result = json.loads(response['body'].read())
-            text = result['output']['message']['content'][0]['text'].strip()
-            # Strip markdown code fences if present
-            json_match = re.search(r'\[.*?\]', text, re.DOTALL)
-            if json_match:
-                text = json_match.group(0)
-            sub_queries = json.loads(text)
-            if isinstance(sub_queries, list) and 1 <= len(sub_queries) <= 5:
-                logger.info(f"[TIMING] Sub-query generation done in {time.time()-t0:.2f}s | {len(sub_queries)} sub-queries: {sub_queries}")
-                return sub_queries
-
-        except Exception as e:
-            logger.warning(f"[TIMING] Sub-query generation failed after {time.time()-t0:.2f}s: {e}")
-
-        # Fallback: use original question as single query
-        return [question]
-
     def ask_questions(self, question: str, session_id: Optional[str] = None, namespace: str = "") -> Dict[str, Any]:
         """
-        Ask a question with RAG retrieval using sub-query decomposition.
-        Optionally maintains conversation history per session via Redis.
+        Ask a question with RAG retrieval using Google Gemini API and sub-query decomposition.
+        
+        Strategy:
+        1. Sub-query decomposition: Split question into 1-5 semantically distinct queries
+        2. Parallel retrieval: Embed each sub-query and fetch top-2 chunks per query via cosine similarity
+        3. Context merging: De-duplicate and rank retrieved chunks by relevance
+        4. Answer synthesis: Use Gemini 2.5 Flash with system prompt + history + context + 5 checkpoints
+        5. Redis caching: Store Q&A pairs for future context (last 5 exchanges, 30-min TTL)
+        
+        Args:
+            question: User's original question
+            session_id: Optional session ID for conversation history
+            namespace: Pinecone namespace for multi-tenancy
+            
+        Returns:
+            Dictionary with answer, sources, timing, and metadata
         """
-        top_k = 3  # 3 chunks per sub-query; total context scales with number of sub-queries
+        top_k = 4  # Retrieve top-4 chunks per sub-query (cosine similarity metric)
         start_time = time.time()
 
         try:
             logger.info(f"[TIMING] ========== START ask_questions ==========")
             logger.info(f"[TIMING] Question: {question[:100]}")
 
-            # Step 1: Intent classification + sub-query generation
+            # Step 1: Intent classification + sub-query generation (Gemini API)
             t1 = time.time()
-            sub_queries = self._generate_sub_queries(question)
+            sub_queries = self.chat_client.generate_sub_queries(question, self.sub_query_template)
             logger.info(f"[TIMING] Step 1 - Sub-query generation: {time.time()-t1:.2f}s")
             logger.info(f"[SUB-QUERIES] {len(sub_queries)} query(s): {sub_queries}")
 
-            # Conversational short-circuit — skip RAG, answer directly
+            # Conversational short-circuit — skip RAG, answer directly from Gemini
             if sub_queries == ["__conversational__"]:
                 history = self.memory.get_history(session_id) if (self.memory and session_id) else "No previous conversation."
                 conv_message = (
@@ -613,22 +610,25 @@ class SimplifiedRAG:
                     f"User's message: {question}\n\n"
                     f"Respond naturally and conversationally."
                 )
-                request_body = json.dumps({
-                    "system": [{"text": self.system_prompt}],
-                    "messages": [{"role": "user", "content": [{"text": conv_message}]}],
-                    "inferenceConfig": {"maxTokens": 200},
-                })
-                response = self.bedrock.invoke_model(modelId=self.chat_model, body=request_body, contentType='application/json')
-                answer = json.loads(response['body'].read())['output']['message']['content'][0]['text']
+                answer = self.chat_client.generate_text(
+                    system_prompt=self.system_prompt,
+                    user_message=conv_message,
+                    max_tokens=200
+                )
                 if self.memory and session_id:
                     self.memory.save(session_id, question, answer)
                 return {
-                    'success': True, 'answer': answer, 'sources': [], 'question': question,
+                    'success': True,
+                    'answer': answer,
+                    'sources': [],
+                    'question': question,
                     'query_time_seconds': round(time.time() - start_time, 2),
-                    'chunks_retrieved': 0, 'sub_queries_used': 0,
+                    'chunks_retrieved': 0,
+                    'sub_queries_used': 0,
+                    'response_type': 'conversational'
                 }
 
-            # Step 2: Embeddings + Pinecone retrieval — run all sub-queries in parallel
+            # Step 2: Parallel Gemini embeddings + Pinecone retrieval
             def retrieve(idx: int, sq: str):
                 t2 = time.time()
                 embedding = self._generate_embeddings([sq])[0]
@@ -644,13 +644,15 @@ class SimplifiedRAG:
                 futures = {executor.submit(retrieve, idx, sq): idx for idx, sq in enumerate(sub_queries)}
                 for future in as_completed(futures):
                     for match in future.result():
-                        if match['id'] not in all_matches:
-                            all_matches[match['id']] = match
+                        # Deduplicate by text content to avoid duplicate uploads showing as separate chunks
+                        text_key = match['metadata'].get('text', '')[:100]
+                        if text_key not in all_matches:
+                            all_matches[text_key] = match
 
             unique_matches = sorted(all_matches.values(), key=lambda m: m['score'], reverse=True)
-            logger.info(f"[TIMING] Step 2 total - Parallel retrieval complete in {time.time()-t_retrieval:.2f}s | {len(unique_matches)} unique chunks")
-            for i, m in enumerate(unique_matches):
-                logger.info(f"[RETRIEVED {i+1}] score={m['score']:.3f} | category={m['metadata'].get('category','')} | Q: {m['metadata'].get('question','')[:100]}")
+            logger.info(f"[TIMING] Step 2 total - Parallel retrieval in {time.time()-t_retrieval:.2f}s | {len(unique_matches)} unique chunks")
+            for i, m in enumerate(unique_matches[:5]):  # Log top 5
+                logger.info(f"[RETRIEVED {i+1}] score={m['score']:.3f} | cat={m['metadata'].get('category','')} | sec={m['metadata'].get('section','')}")
 
             # Step 3: Build context and sources
             context_chunks = []
@@ -669,12 +671,13 @@ class SimplifiedRAG:
 
             context_text = "\n\n".join(context_chunks)
 
-            # Short-circuit: no context retrieved
+            # Fallback: no context retrieved
             if not unique_matches:
-                logger.warning("[RAG] No chunks retrieved — returning fallback answer")
+                logger.warning("[RAG] No chunks retrieved — returning graceful failure")
                 return {
-                    'success': True,
-                    'answer': "I don't have details on that — contact support@qucoon.com",
+                    'success': False,
+                    'error': "No relevant context found in knowledge base",
+                    'answer': "I don't have information on that topic. Please try rephrasing your question.",
                     'sources': [],
                     'question': question,
                     'query_time_seconds': round(time.time() - start_time, 2),
@@ -682,10 +685,10 @@ class SimplifiedRAG:
                     'sub_queries_used': len(sub_queries),
                 }
 
-            # Step 4: Answer synthesis — pass original question + context + history
+            # Step 4: Answer synthesis via Gemini 2.5 Flash
             history = self.memory.get_history(session_id) if (self.memory and session_id) else "No previous conversation."
             if history != "No previous conversation.":
-                logger.info(f"[REDIS] Injecting history for session {session_id}")
+                logger.info(f"[REDIS] Injecting {len(context_chunks)} context chunks + history for session {session_id}")
 
             user_message = self.user_template.format(
                 history=history,
@@ -693,25 +696,16 @@ class SimplifiedRAG:
                 question=question,
             )
 
-            request_body = json.dumps({
-                "system": [{"text": self.system_prompt}],
-                "messages": [{"role": "user", "content": [{"text": user_message}]}],
-                "inferenceConfig": {"maxTokens": 1000},
-            })
-
             t4 = time.time()
-            logger.info("[TIMING] Step 4 - Calling Bedrock for answer synthesis...")
-            response = self.bedrock.invoke_model(
-                modelId=self.chat_model,
-                body=request_body,
-                contentType='application/json'
+            logger.info("[TIMING] Step 4 - Calling Gemini for answer synthesis...")
+            answer = self.chat_client.generate_text(
+                system_prompt=self.system_prompt,
+                user_message=user_message,
+                max_tokens=1000
             )
-
-            result = json.loads(response['body'].read())
-            answer = result['output']['message']['content'][0]['text']
             logger.info(f"[TIMING] Step 4 - Answer synthesis done: {time.time()-t4:.2f}s")
 
-            # Save only raw question + answer (no context) to Redis
+            # Save Q&A to Redis history
             if self.memory and session_id:
                 self.memory.save(session_id, question, answer)
 
@@ -727,10 +721,13 @@ class SimplifiedRAG:
                 'chunks_retrieved': len(context_chunks),
                 'metadata': {
                     'embedding_model': self.embedding_model,
-                    'chat_model': self.chat_model,
-                    'top_k_used': top_k,
+                    'text_model': self.text_model,
+                    'embedding_dimension': EMBEDDING_DIMENSION,
+                    'chunking_strategy': 'recursive_with_overlap',
+                    'top_k_per_query': top_k,
                     'sub_queries_used': len(sub_queries),
-                }
+                },
+                'response_type': 'rag'
             }
 
         except Exception as e:
@@ -743,142 +740,25 @@ class SimplifiedRAG:
                 'query_time_seconds': round(time.time() - start_time, 2)
             }
     
+    def ask_questions_stream(self, question: str, session_id: str | None = None, namespace: str = ""):
+        """Yield answer text word-by-word for SSE streaming (wraps ask_questions)."""
+        result = self.ask_questions(question=question, session_id=session_id, namespace=namespace)
+        answer = result.get("answer") or ""
+        for word in answer.split(" "):
+            yield word + " "
 
-    
-
-    # =========================
-    # ADMIN / MANAGEMENT
-    # =========================
-
-    def add_single_qa(
-        self,
-        question: str,
-        answer: str,
-        category: str = "General",
-        section: str = "General",
-        namespace: str = "",
-    ) -> Dict[str, Any]:
-        """Add a single Q&A pair to Pinecone."""
-        try:
-            doc_id = str(uuid.uuid4())
-            chunk_text = f"Q: {question}\nA: {answer}"
-            tokens = self.tokenizer.encode(chunk_text)
-            chunk = {
-                "text": chunk_text,
-                "question": question,
-                "answer": answer,
-                "section": section,
-                "category": category,
-                "token_count": len(tokens),
-                "char_count": len(chunk_text),
-                "chunk_index": 0,
-            }
-            embedding = self._generate_embeddings([chunk_text])[0]
-            result = self._upload_to_pinecone([chunk], [embedding], doc_id, "manual_entry", namespace=namespace)
-            logger.info(f"[ADMIN] Added Q&A pair (doc_id={doc_id})")
-            return {"success": True, "document_id": doc_id, **result}
-        except Exception as e:
-            logger.error(f"[ADMIN] Failed to add Q&A: {e}", exc_info=True)
-            return {"success": False, "error": str(e)}
-
-    def search_qa(self, query: str, top_k: int = 3, namespace: str = "") -> List[Dict[str, Any]]:
-        """Search existing Q&A pairs by semantic similarity. Returns top_k results with vector IDs."""
-        try:
-            embedding = self._generate_embeddings([query])[0]
-            results = self.index.query(vector=embedding, top_k=top_k, include_metadata=True, namespace=namespace)
-            matches = []
-            for m in results["matches"]:
-                matches.append({
-                    "id": m["id"],
-                    "score": round(m["score"], 3),
-                    "question": m["metadata"].get("question", ""),
-                    "answer": m["metadata"].get("answer", ""),
-                    "category": m["metadata"].get("category", ""),
-                    "section": m["metadata"].get("section", ""),
-                    "filename": m["metadata"].get("filename", ""),
-                    "document_id": m["metadata"].get("document_id", ""),
-                })
-            logger.info(f"[ADMIN] search_qa({query[:60]}) → {len(matches)} results")
-            return matches
-        except Exception as e:
-            logger.error(f"[ADMIN] search_qa failed: {e}", exc_info=True)
-            return []
-
-    def update_qa(self, vector_id: str, new_answer: str, new_question: str | None = None, namespace: str = "") -> Dict[str, Any]:
-        """
-        Update an existing Q&A vector in Pinecone.
-        Re-embeds with new text and upserts.
-        """
-        try:
-            # Fetch current vector metadata
-            fetch_result = self.index.fetch(ids=[vector_id], namespace=namespace)
-            if vector_id not in fetch_result["vectors"]:
-                return {"success": False, "error": f"Vector {vector_id} not found"}
-
-            old_meta = fetch_result["vectors"][vector_id]["metadata"]
-            question = new_question if new_question else old_meta.get("question", "")
-            answer = new_answer
-
-            chunk_text = f"Q: {question}\nA: {answer}"
-            tokens = self.tokenizer.encode(chunk_text)
-
-            # Re-generate embedding
-            embedding = self._generate_embeddings([chunk_text])[0]
-
-            # Build updated metadata
-            updated_meta = {**old_meta}
-            updated_meta["question"] = question
-            updated_meta["answer"] = answer
-            updated_meta["text"] = chunk_text
-            updated_meta["token_count"] = len(tokens)
-            updated_meta["char_count"] = len(chunk_text)
-            updated_meta["updated_at"] = datetime.now().isoformat()
-
-            self.index.upsert(vectors=[{"id": vector_id, "values": embedding, "metadata": updated_meta}], namespace=namespace)
-            logger.info(f"[ADMIN] Updated vector {vector_id}")
-            return {"success": True, "vector_id": vector_id}
-        except Exception as e:
-            logger.error(f"[ADMIN] update_qa failed for {vector_id}: {e}", exc_info=True)
-            return {"success": False, "error": str(e)}
-
-    def bulk_add_qa(self, qa_pairs: List[Dict[str, str]], category: str = "General", section: str = "General", namespace: str = "") -> Dict[str, Any]:
-        """
-        Bulk-add a list of Q&A pairs.
-        Each item in qa_pairs must have 'question' and 'answer' keys.
-        """
-        try:
-            doc_id = str(uuid.uuid4())
-            chunks = []
-            for i, pair in enumerate(qa_pairs):
-                q = pair["question"].strip()
-                a = pair["answer"].strip()
-                chunk_text = f"Q: {q}\nA: {a}"
-                tokens = self.tokenizer.encode(chunk_text)
-                chunks.append({
-                    "text": chunk_text,
-                    "question": q,
-                    "answer": a,
-                    "section": section,
-                    "category": category,
-                    "token_count": len(tokens),
-                    "char_count": len(chunk_text),
-                    "chunk_index": i,
-                })
-
-            texts = [c["text"] for c in chunks]
-            embeddings = self._generate_embeddings(texts)
-            result = self._upload_to_pinecone(chunks, embeddings, doc_id, "bulk_upload", namespace=namespace)
-            logger.info(f"[ADMIN] Bulk-added {len(chunks)} Q&A pairs (doc_id={doc_id})")
-            return {"success": True, "document_id": doc_id, "pairs_added": len(chunks), **result}
-        except Exception as e:
-            logger.error(f"[ADMIN] bulk_add_qa failed: {e}", exc_info=True)
-            return {"success": False, "error": str(e)}
-
-    # =================
     # UTILITY FUNCTIONS
     # =================
     def get_database_stats(self, namespace: str | None = None) -> Dict[str, Any]:
-        """Get database statistics. If namespace is given, return stats for that tenant only."""
+        """
+        Get database statistics for Pinecone index.
+        
+        Args:
+            namespace: Optional namespace to get stats for specific tenant
+            
+        Returns:
+            Dictionary with vector counts, dimensions, and namespace info
+        """
         try:
             stats = self.index.describe_index_stats()
             logger.info(f"Retrieved DB stats: {stats}")
@@ -889,13 +769,14 @@ class SimplifiedRAG:
                     'namespace': namespace,
                     'total_vectors': ns_stats.get('vector_count', 0),
                     'index_name': self.index_name,
+                    'embedding_dimension': EMBEDDING_DIMENSION,
                 }
 
-            # No namespace specified — return global overview with all namespaces
+            # No namespace specified — return global overview
             return {
                 'total_vectors': stats['total_vector_count'],
                 'index_fullness': stats.get('index_fullness', 0),
-                'dimension': stats.get('dimension', 512),
+                'embedding_dimension': EMBEDDING_DIMENSION,
                 'index_name': self.index_name,
                 'namespaces': {ns: info for ns, info in stats.get('namespaces', {}).items()},
             }
@@ -904,37 +785,45 @@ class SimplifiedRAG:
             return {'error': str(e)}
     
     def list_all_documents(self, namespace: str = "") -> List[Dict[str, Any]]:
-        """List all documents in a specific namespace"""
+        """
+        List all documents in a specific namespace.
+        Uses a dummy zero-vector query to retrieve metadata without semantic matching.
+        
+        Args:
+            namespace: Pinecone namespace to query
+            
+        Returns:
+            List of documents with document_id, filename, created_at, chunk_count
+        """
         try:
-            logger.info(f"Listing documents in namespace '{namespace}'... (uses dummy query)")
+            logger.info(f"Listing documents in namespace '{namespace}'...")
+            # Use a zero vector (1536 dimensions) to retrieve all chunks without filtering
             sample_results = self.index.query(
-                vector=[0.0] * 512,
+                vector=[0.0] * EMBEDDING_DIMENSION,
                 top_k=1000,
                 include_metadata=True,
                 namespace=namespace,
             )
             
-            # Group by document_id to aggregate document info
+            # Aggregate chunks by document_id
             documents = {}
             for match in sample_results['matches']:
                 metadata = match['metadata']
                 doc_id = metadata.get('document_id', 'unknown')
                 
-                # If this is the first time seeing this doc_id, initialize it
                 if doc_id not in documents:
                     documents[doc_id] = {
                         'document_id': doc_id,
                         'filename': metadata.get('filename', 'unknown'),
                         'created_at': metadata.get('created_at', 'unknown'),
-                        'chunk_count': 0
+                        'chunk_count': 0,
+                        'embedding_dimension': EMBEDDING_DIMENSION,
                     }
-                # Increment the chunk count for this document
                 documents[doc_id]['chunk_count'] += 1
             
-            logger.info(f"Found {len(documents)} unique documents.")
-            # Return the aggregated list of documents
+            logger.info(f"Found {len(documents)} unique documents in namespace '{namespace}'.")
             return list(documents.values())
             
         except Exception as e:
-            logger.error(f"Failed to list all documents: {e}", exc_info=True)
-            return [] # Return empty list on failure
+            logger.error(f"Failed to list documents: {e}", exc_info=True)
+            return []
