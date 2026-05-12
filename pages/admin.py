@@ -1,7 +1,17 @@
 import streamlit as st
 import requests
+from src.simplified_rag import SimplifiedRAG
 
-API_URL = "http://localhost:8000"
+# ── RAG System Initialization ──────────────────────────────────────────────────
+@st.cache_resource
+def get_rag_system():
+    try:
+        return SimplifiedRAG()
+    except Exception as e:
+        st.error(f"Failed to initialize RAG system: {e}")
+        return None
+
+rag_system = get_rag_system()
 
 st.set_page_config(
     page_title="Agora Admin",
@@ -38,30 +48,28 @@ with tab_upload:
         submitted = st.form_submit_button("Upload Document", type="primary", use_container_width=True)
 
     if submitted:
-        if not target_index.strip():
+        if not rag_system:
+            st.error("RAG system not initialized.")
+        elif not target_index.strip():
             st.warning("Please specify an Index (Namespace).")
         elif not uploaded_file:
-            st.warning("Please upload a TXT or PDF file.")
+            st.warning("Please upload a file.")
         else:
-            with st.spinner(f"Uploading '{uploaded_file.name}' to index '{target_index.strip()}'..."):
+            with st.spinner(f"Processing '{uploaded_file.name}' into index '{target_index.strip()}'..."):
                 try:
-                    mime = "text/plain" if uploaded_file.name.endswith(".txt") else "application/pdf"
-                    files = {"file": (uploaded_file.name, uploaded_file.getvalue(), mime)}
-                    form_data = {"entity_id": target_index.strip()}
-                    resp = requests.post(
-                        f"{API_URL}/insert-doc-vector-db",
-                        files=files,
-                        data=form_data,
-                        timeout=120,
+                    file_bytes = uploaded_file.getvalue()
+                    result = rag_system.add_to_existing_collection(
+                        file_bytes=file_bytes,
+                        filename=uploaded_file.name,
+                        namespace=target_index.strip(),
                     )
-                    data = resp.json()
-                    if data.get("responseCode") == "00":
-                        st.success(f"✓ Upload started! Task ID: `{data.get('data', {}).get('task_id', 'unknown')}`")
-                        st.info("Processing in background — check Task Status tab or poll /task-status.")
+                    if result.get('success'):
+                        st.success(f"✓ Successfully indexed '{uploaded_file.name}'!")
+                        st.json(result)
                     else:
-                        st.error(f"Error: {data.get('responseMessage', 'Unknown Upload Error')}")
+                        st.error(f"Error: {result.get('error', 'Unknown error')}")
                 except Exception as e:
-                    st.error(f"Connection error: {e}")
+                    st.error(f"Processing error: {e}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — Database Stats
@@ -75,36 +83,35 @@ with tab_stats:
         stats_btn = st.form_submit_button("Get Stats", type="primary", use_container_width=True)
 
     if stats_btn:
-        with st.spinner("Fetching statistics..."):
-            try:
-                resp = requests.get(
-                    f"{API_URL}/stats",
-                    params={"entity_id": stats_index.strip()} if stats_index.strip() else {},
-                    timeout=30,
-                )
-                data = resp.json()
-                if data.get("responseCode") == "00":
-                    stats_data = data.get("data", {})
+        if not rag_system:
+            st.error("RAG system not initialized.")
+        else:
+            with st.spinner("Fetching statistics..."):
+                try:
+                    # stats = rag_system.get_database_stats(namespace=stats_index.strip() if stats_index.strip() else None)
+                    # Use the index.describe_index_stats() directly to match app.py logic
+                    raw_stats = rag_system.index.describe_index_stats()
                     
                     if stats_index.strip():
+                        ns_stats = raw_stats.get("namespaces", {}).get(stats_index.strip(), {})
                         col1, col2 = st.columns(2)
                         with col1:
-                            st.metric("Namespace", stats_data.get("namespace", "Unknown"))
+                            st.metric("Namespace", stats_index.strip())
                         with col2:
-                            st.metric("Vector Count", stats_data.get("total_vectors", 0))
+                            st.metric("Vector Count", ns_stats.get("vector_count", 0))
                         
-                        st.info(f"Index: {stats_data.get('index_name', 'Unknown')}")
+                        st.info(f"Index: {rag_system.index_name}")
                     else:
                         col1, col2, col3 = st.columns(3)
                         with col1:
-                            st.metric("Total Vectors", stats_data.get("total_vectors", 0))
+                            st.metric("Total Vectors", raw_stats.get("total_vector_count", 0))
                         with col2:
-                            st.metric("Index Fullness", f"{stats_data.get('index_fullness', 0):.1%}")
+                            st.metric("Index Fullness", f"{raw_stats.get('index_fullness', 0):.1%}")
                         with col3:
-                            st.metric("Embedding Dimension", stats_data.get("embedding_dimension", 1536))
+                            st.metric("Embedding Dimension", raw_stats.get("dimension", 1536))
                         
                         # Show all namespaces
-                        namespaces = stats_data.get("namespaces", {})
+                        namespaces = raw_stats.get("namespaces", {})
                         if namespaces:
                             st.subheader("Namespaces")
                             for ns_name, ns_info in namespaces.items():
@@ -113,10 +120,8 @@ with tab_stats:
                                     st.write(f"**{ns_name}**")
                                 with col2:
                                     st.metric("Vectors", ns_info.get("vector_count", 0))
-                else:
-                    st.error(f"Error: {data.get('responseMessage', 'Unknown Error')}")
-            except Exception as e:
-                st.error(f"Connection error: {e}")
+                except Exception as e:
+                    st.error(f"Error fetching stats: {e}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 3 — Clear Database
@@ -132,22 +137,19 @@ with tab_clear:
         clear_btn = st.form_submit_button("🚨 Delete All Data in Index", type="primary", use_container_width=True)
 
     if clear_btn:
-        if not clear_index.strip():
+        if not rag_system:
+            st.error("RAG system not initialized.")
+        elif not clear_index.strip():
             st.warning("Please specify the Index to clear.")
         elif confirm_text.strip().upper() != "YES":
             st.warning("You must type 'YES' to confirm deletion.")
         else:
             with st.spinner(f"Clearing index '{clear_index.strip()}'..."):
                 try:
-                    resp = requests.post(
-                        f"{API_URL}/reset-vector-db",
-                        data={"entity_id": clear_index.strip(), "confirm": "YES"},
-                        timeout=120,
-                    )
-                    data = resp.json()
-                    if data.get("responseCode") == "00":
+                    result = rag_system.reset_vector_database(namespace=clear_index.strip())
+                    if result.get('success'):
                         st.success(f"✓ Successfully cleared all data from index '{clear_index.strip()}'.")
                     else:
-                        st.error(f"Error: {data.get('responseMessage', 'Unknown Reset Error')}")
+                        st.error(f"Error: {result.get('error', 'Unknown error')}")
                 except Exception as e:
-                    st.error(f"Connection error: {e}")
+                    st.error(f"Error clearing database: {e}")

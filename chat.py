@@ -2,10 +2,21 @@ import json
 import streamlit as st
 import requests
 import redis
+import uuid
 from datetime import datetime
 from src.utils import load_project_env, read_env_value
+from src.simplified_rag import SimplifiedRAG
 
-API_URL = "http://localhost:8000"
+# ── RAG System Initialization ──────────────────────────────────────────────────
+@st.cache_resource
+def get_rag_system():
+    try:
+        return SimplifiedRAG()
+    except Exception as e:
+        st.error(f"Failed to initialize RAG system: {e}")
+        return None
+
+rag_system = get_rag_system()
 ENTITY_ID = st.query_params.get("entity_id", "policy")
 
 st.set_page_config(
@@ -78,33 +89,27 @@ def upstash_delete_session(session_id: str):
     rc.hdel(SESSIONS_INDEX, session_id)
     rc.delete(f"agora:{session_id}:messages")
 
-# ── API helpers ────────────────────────────────────────────────────────────────
-def api_create_session() -> str | None:
-    try:
-        resp = requests.post(f"{API_URL}/create-session", timeout=15)
-        data = resp.json()
-        if data.get("responseCode") == "00":
-            return data["data"]["session_id"]
-    except Exception:
-        pass
-    return None
+# ── API helpers (Now Local Calls) ───────────────────────────────────────────────
+def api_create_session() -> str:
+    return str(uuid.uuid4())
 
 def api_ask(question: str, session_id: str) -> tuple[str, list]:
+    if not rag_system:
+        return "❌ RAG system not initialized. Check your environment variables.", []
+    
     try:
-        resp = requests.post(
-            f"{API_URL}/ask-question",
-            json={"entity_id": ENTITY_ID, "question": question, "session_id": session_id},
-            timeout=60,
+        result = rag_system.ask_questions(
+            question=question,
+            session_id=session_id,
+            namespace=ENTITY_ID,
         )
-        data = resp.json()
-        if data.get("responseCode") == "00":
-            result = data.get("data", {})
-            return result.get("answer", "No answer returned."), result.get("sources", [])
-        return f"⚠️ {data.get('responseMessage', 'Something went wrong')}", []
-    except requests.exceptions.Timeout:
-        return "⏱️ Request timed out. Please try again.", []
+        if result.get("success"):
+            answer = result.get("answer", "No answer returned.")
+            sources = result.get("sources", [])
+            return answer, sources
+        return f"⚠️ {result.get('error', 'Something went wrong')}", []
     except Exception as e:
-        return f"❌ Connection error: {str(e)}", []
+        return f"❌ Error: {str(e)}", []
 
 # ── Session state init ─────────────────────────────────────────────────────────
 if "active_session_id" not in st.session_state:
@@ -175,8 +180,9 @@ with st.sidebar:
 st.title("Agora")
 
 if not st.session_state.active_session_id:
-    st.caption("Starting session...")
-    st.stop()
+    sid = api_create_session()
+    st.session_state.active_session_id = sid
+    st.session_state.local_messages = []
 
 # Show welcome only when no messages
 if not st.session_state.local_messages:
