@@ -701,7 +701,7 @@ class SimplifiedRAG:
             answer = self.chat_client.generate_text(
                 system_prompt=self.system_prompt,
                 user_message=user_message,
-                max_tokens=1000
+                max_tokens=2048
             )
             logger.info(f"[TIMING] Step 4 - Answer synthesis done: {time.time()-t4:.2f}s")
 
