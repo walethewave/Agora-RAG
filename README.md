@@ -22,7 +22,7 @@
 
 ## What This Is
 
-Agora is a RAG system built on the [ETO AGORA corpus](https://www.kaggle.com/datasets/umerhaddii/ai-governance-documents-data) — a collection of AI-relevant laws, regulations, and governance documents from jurisdictions worldwide. It ingests `.txt` and `.pdf` files, chunks and embeds them into a Pinecone vector database, and answers questions using Gemini 2.5 Flash with retrieved context.
+Agora is a RAG system built on the [ETO AGORA corpus](https://www.kaggle.com/datasets/umerhaddii/ai-governance-documents-data) — a collection of AI-relevant laws, regulations, and governance documents from jurisdictions worldwide. It ingests `.txt` files, chunks and embeds them into a Pinecone vector database, and answers questions using Gemini 2.5 Flash with retrieved context.
 
 The focus is on **answer quality over UI polish**: every response is grounded in retrieved documents, source-attributed, and filtered through a strict governance analyst prompt that distinguishes between what a document *prohibits*, *requires*, *recommends*, or *permits*.
 
@@ -190,7 +190,7 @@ Without decomposition, asking "What are the reporting requirements and who enfor
 | Mode | Latency | Accuracy on multi-part questions |
 |---|---|---|
 | Without decomposition | ~4s | Misses one aspect of the question |
-| With decomposition | ~6–10s | Both aspects retrieved and addressed |
+| With decomposition | ~6–8s | Both aspects retrieved and addressed |
 
 The extra 2–3 seconds is a deliberate choice. For a governance Q&A system where correctness matters more than speed, I'd always make this call.
 
@@ -399,7 +399,7 @@ Summarise everything in the database.
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `POST` | `/insert-doc-vector-db` | Upload `.txt` or `.pdf`, chunk, embed, and upsert to Pinecone. Runs as a background task. Returns `task_id`. |
+| `POST` | `/insert-doc-vector-db` | Upload `.txt`, chunk, embed, and upsert to Pinecone. Runs as a background task. Returns `task_id`. to check the progress of each txt |
 | `POST` | `/replace-document-vectors` | Delete all vectors matching a filename, then re-index. Requires `confirm=YES`. |
 | `POST` | `/reset-vector-db` | Wipe all vectors in a namespace. Requires `confirm=YES`. |
 
