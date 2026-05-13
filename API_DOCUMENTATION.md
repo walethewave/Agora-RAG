@@ -1,32 +1,6 @@
-# Qorpy RAG — Frontend API Integration Guide (v3 — Multi-Tenant)
+# Agora RAG — API Documentation
 
-> This document is intended for the frontend engineering team. It covers how to integrate the FastAPI/AWS Lambda backend into the **End-User Chat Interface** and the **Admin Dashboard**.
-
-> **Breaking change from v2:** Every endpoint now requires an `entity_id` field. This is the identifier for the specific client app (e.g. `"qorpy-business"`, `"acme-corp"`). It acts as a namespace in Pinecone, guaranteeing that each client's data is completely isolated from all other clients.
-
----
-
-## Table of Contents
-
-1. [Base Information](#base-information)
-2. [How entity_id Works](#how-entity_id-works)
-3. [Quick Start Workflows](#quick-start-workflows)
-4. [Standard Response Format](#standard-response-format)
-5. [Chat Interface Endpoints](#chat-interface-endpoints)
-   - [Create a Chat Session](#create-a-chat-session)
-   - [Ask a Question](#ask-a-question)
-6. [Admin & Document Management Endpoints](#admin--document-management-endpoints)
-   - [Upload a PDF Document](#upload-a-pdf-document)
-   - [Check Background Task Status](#check-background-task-status)
-   - [Get System Stats](#get-system-stats)
-   - [List All Entities](#list-all-entities)
-   - [Replace an Existing Document](#replace-an-existing-document)
-   - [Wipe a Tenant Namespace](#wipe-a-tenant-namespace)
-7. [Manual Q&A Management Endpoints](#manual-qa-management-endpoints)
-   - [Search Existing Q&As](#search-existing-qas)
-   - [Add a Single Q&A](#add-a-single-qa)
-   - [Update a Q&A](#update-a-qa)
-   - [Bulk Add from Excel](#bulk-add-from-excel)
+> REST API reference for the Agora AI Governance Document Q&A System.
 
 ---
 
@@ -34,60 +8,34 @@
 
 | Property | Value |
 |---|---|
-| **Base URL (Production)** | `https://gij3liro3kouweizzludyyhbe40dsxcw.lambda-url.us-east-1.on.aws` |
 | **Base URL (Local Dev)** | `http://localhost:8000` |
-| **Swagger UI** | `{Base URL}/docs` (for reference only) |
+| **Swagger UI** | `http://localhost:8000/docs` |
 | **Content Types** | `application/json` or `multipart/form-data` (per endpoint) |
 | **API Version** | `3.0.0` |
+
+> **Note:** The Streamlit frontend (`chat.py`) calls `SimplifiedRAG` directly in-process — it does **not** require the FastAPI backend to be running. The REST API is for external integrations, testing via Swagger, or AWS Lambda deployment (via Mangum adapter).
 
 ---
 
 ## How `entity_id` Works
 
-`entity_id` is the single most important field in this API. Here is exactly how it works:
+`entity_id` is used as a **Pinecone namespace** to isolate document sets:
 
-- Each client app (e.g. Qorpy Business, Acme Corp) has its own unique `entity_id` string.
-- **You must hardcode this string in your frontend app** for the specific client you are building for.
-- On every single API call, you send this `entity_id` as a parameter in the JSON body (or Form data).
-- The backend uses it as a **Pinecone namespace** — meaning documents uploaded for `acme-corp` are 100% invisible to `qorpy-business` and vice versa.
-- The backend does **not** validate or look up `entity_id` in any database. It trusts whatever you send.
-
-**Example mapping:**
-
-| Client App | entity_id to hardcode |
-|---|---|
-| Qorpy Business | `"qorpy-business"` |
-| Acme Corp | `"acme-corp"` |
-| Facility Management | `"facility-001"` |
-
----
-
-## Quick Start Workflows
-
-### Building the Chat Interface
-
-1. **On widget open** — Call `POST /create-session` with `entity_id` to get a `session_id`.
-2. **On message send** — Call `POST /ask-question` with `entity_id`, `session_id`, and the user's message.
-
-### Building the Admin Dashboard
-
-| Goal | Endpoint(s) |
-|---|---|
-| Upload and train on a PDF | `POST /insert-doc-vector-db` → poll `GET /task-status/{task_id}` |
-| Manage manual Q&A entries | `POST /add-qa`, `POST /update-qa`, `POST /search-qa`, `POST /bulk-add-qa` |
-| View indexed document metrics | `GET /stats?entity_id=...` |
-| List all active client namespaces | `GET /entities` |
+- `entity_id=policy` → AGORA governance documents
+- `entity_id=legal` → a separate document collection
+- Upload, query, and clear operations are fully namespace-isolated
+- The backend does **not** validate `entity_id` — it trusts whatever the caller sends
 
 ---
 
 ## Standard Response Format
 
-Nearly all endpoints return a consistent JSON envelope:
+All endpoints return a consistent JSON envelope:
 
 ```json
 {
   "responseCode": "00",
-  "responseMessage": "Human readable message describing the result",
+  "responseMessage": "Human readable message",
   "data": {}
 }
 ```
@@ -95,36 +43,31 @@ Nearly all endpoints return a consistent JSON envelope:
 | Field | Type | Description |
 |---|---|---|
 | `responseCode` | `string` | `"00"` = success; `"01"` = error |
-| `responseMessage` | `string` | A human-readable description of the result |
-| `data` | `object` | The response payload (may be omitted on some responses) |
+| `responseMessage` | `string` | Human-readable description of the result |
+| `data` | `object` | Response payload (may be `null` on errors) |
 
 ---
 
-## Chat Interface Endpoints
+## Endpoints
+
+### Health Check
+
+**`GET /`**
+
+```json
+{
+  "responseCode": "00",
+  "responseMessage": "Simplified RAG API is running successfully"
+}
+```
+
+---
 
 ### Create a Chat Session
 
 **`POST /create-session`**
 
-Initializes a new conversation session scoped to a specific client. Call this once when the chat widget opens.
-
-**Headers**
-
-```
-Content-Type: application/json
-```
-
-**Request Body**
-
-```json
-{
-  "entity_id": "qorpy-business"
-}
-```
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `entity_id` | `string` | **Yes** | The unique identifier for this client app |
+Generates a new `session_id` for conversation memory. No request body required.
 
 **Response**
 
@@ -138,37 +81,31 @@ Content-Type: application/json
 }
 ```
 
-Store the returned `session_id` and attach it to every subsequent `/ask-question` request.
-
 ---
 
 ### Ask a Question
 
 **`POST /ask-question`**
 
-Sends the user's message to the AI and returns an answer sourced only from that client's knowledge base.
+RAG Q&A with sub-query decomposition, scoped to a namespace.
 
-**Headers**
-
-```
-Content-Type: application/json
-```
+**Headers:** `Content-Type: application/json`
 
 **Request Body**
 
 ```json
 {
-  "entity_id": "qorpy-business",
+  "entity_id": "policy",
   "session_id": "123e4567-e89b-12d3-a456-426614174000",
-  "question": "What is the refund policy?"
+  "question": "What are the reporting requirements for AI integration?"
 }
 ```
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `entity_id` | `string` | **Yes** | The client namespace — determines which knowledge base to search |
-| `question` | `string` | **Yes** | The user's message |
-| `session_id` | `string` | No | Session ID for conversation memory. Omit if stateless |
+| `entity_id` | `string` | **Yes** | Namespace to search |
+| `question` | `string` | **Yes** | The user's question |
+| `session_id` | `string` | No | Session ID for conversation memory (from `/create-session`) |
 
 **Response**
 
@@ -177,13 +114,13 @@ Content-Type: application/json
   "responseCode": "00",
   "responseMessage": "Question answered successfully",
   "data": {
-    "answer": "The refund policy states that you can return items within 30 days...",
+    "answer": "According to the documents, the following reports are required...",
     "sources": [
       {
-        "filename": "return_policy_2024.pdf",
-        "category": "Refunds",
-        "section": "Returns",
-        "relevance_score": 0.89
+        "filename": "10.txt",
+        "category": "",
+        "section": "",
+        "relevance_score": 0.842
       }
     ]
   }
@@ -192,58 +129,44 @@ Content-Type: application/json
 
 ---
 
-## Admin & Document Management Endpoints
-
-### Upload a PDF Document
+### Upload a Document
 
 **`POST /insert-doc-vector-db`**
 
-Uploads a PDF, extracts its content, and trains the AI within a specific client namespace. Processing runs as a background task.
+Upload a `.txt` or `.pdf` file, chunk it, embed with Gemini, and upsert to Pinecone. Runs as a background task.
 
-**Headers**
+**Headers:** `Content-Type: multipart/form-data`
 
-```
-Content-Type: multipart/form-data
-```
-
-**Request Form Data**
+**Form Data**
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `entity_id` | `string` | **Yes** | The client namespace to upload the document into |
-| `doc_id` | `string` | **Yes** | A unique identifier for this document |
-| `file` | `file` | **Yes** | The PDF file to upload (max 10 MB) |
+| `entity_id` | `string` | **Yes** | Namespace to upload into |
+| `file` | `file` | **Yes** | `.txt` or `.pdf` file (max 10 MB) |
 
 **Response**
 
 ```json
 {
   "responseCode": "00",
-  "responseMessage": "Background task started to process 'doc_123'.",
+  "responseMessage": "Background task started to process '5.txt'.",
   "data": {
-    "entity_id": "qorpy-business",
-    "doc_id": "doc_123",
+    "entity_id": "policy",
     "task_id": "task-uuid-here",
-    "file_size_mb": 2.5
+    "file_size_mb": 0.02
   }
 }
 ```
 
-Poll `GET /task-status/{task_id}` to track progress.
+Poll `/task-status/{task_id}` to track progress.
 
 ---
 
-### Check Background Task Status
+### Check Task Status
 
 **`GET /task-status/{task_id}`**
 
-Returns the current status of a background task. Poll every 3 seconds after a document upload.
-
-**Path Parameter**
-
-| Parameter | Type | Description |
-|---|---|---|
-| `task_id` | `string` | The task ID returned by the upload endpoint |
+Poll the status of a background upload/replace task.
 
 **Response**
 
@@ -253,8 +176,8 @@ Returns the current status of a background task. Poll every 3 seconds after a do
   "responseMessage": "Task status retrieved",
   "data": {
     "task_id": "task-uuid-here",
-    "status": "running",
-    "message": "Processing doc_123"
+    "status": "done",
+    "message": "Successfully added 5.txt"
   }
 }
 ```
@@ -267,11 +190,69 @@ Returns the current status of a background task. Poll every 3 seconds after a do
 
 ---
 
-### Get System Stats
+### Replace a Document
+
+**`POST /replace-document-vectors`**
+
+Deletes existing vectors matching the filename in a namespace, then re-indexes the new file.
+
+**Headers:** `Content-Type: multipart/form-data`
+
+**Form Data**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `entity_id` | `string` | **Yes** | Namespace the document belongs to |
+| `confirm` | `string` | **Yes** | Must be exactly `"YES"` |
+| `file` | `file` | **Yes** | New `.txt` or `.pdf` file (max 10 MB) |
+
+**Response**
+
+```json
+{
+  "responseCode": "00",
+  "responseMessage": "Document vector replacement started",
+  "data": {
+    "entity_id": "policy",
+    "task_id": "task-uuid-here"
+  }
+}
+```
+
+---
+
+### Wipe a Namespace
+
+**`POST /reset-vector-db`**
+
+Permanently deletes **all vectors** in the specified namespace. Does not affect other namespaces.
+
+**Headers:** `Content-Type: multipart/form-data`
+
+**Form Data**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `entity_id` | `string` | **Yes** | Namespace to wipe |
+| `confirm` | `string` | **Yes** | Must be exactly `"YES"` |
+
+**Response**
+
+```json
+{
+  "responseCode": "00",
+  "responseMessage": "Namespace 'policy' reset successfully",
+  "data": {}
+}
+```
+
+---
+
+### Get Database Stats
 
 **`GET /stats`**
 
-Returns database metrics and indexed document counts. It automatically returns a breakdown of the vector count for every single `entity_id` currently in the database.
+Returns global index statistics with per-namespace vector counts.
 
 **No parameters required.**
 
@@ -282,15 +263,12 @@ Returns database metrics and indexed document counts. It automatically returns a
   "responseCode": "00",
   "responseMessage": "Database statistics fetched successfully",
   "data": {
-    "total_vectors": 890,
-    "index_name": "qorpyy",
-    "dimension": 512,
+    "total_vectors": 36,
+    "index_name": "cyber",
+    "dimension": 1536,
     "entity_ids": {
-      "qorpy-business": {
-        "vector_count": 142
-      },
-      "acme-corp": {
-        "vector_count": 748
+      "policy": {
+        "vector_count": 36
       }
     }
   }
@@ -299,203 +277,62 @@ Returns database metrics and indexed document counts. It automatically returns a
 
 ---
 
-### List All Entities
+### List All Namespaces
 
 **`GET /entities`**
 
-Lists all active `entity_id` namespaces that have data in the Pinecone index. Useful for recovery and admin oversight.
+Lists all active namespaces (entity_ids) in the Pinecone index.
 
-**No request body or parameters required.**
-
-**Response**
-
-```json
-{
-  "responseCode": "00",
-  "responseMessage": "Found 3 entities",
-  "data": {
-    "entities": ["qorpy-business", "acme-corp", "facility-001"],
-    "count": 3
-  }
-}
-```
-
----
-
-### Replace an Existing Document
-
-**`POST /replace-document-vectors`**
-
-Deletes the existing vectors for a given document within a client namespace and replaces them with a new PDF upload. Returns a `task_id` — poll `/task-status/{task_id}` to track completion.
-
-**Headers**
-
-```
-Content-Type: multipart/form-data
-```
-
-**Request Form Data**
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `entity_id` | `string` | **Yes** | The client namespace the document belongs to |
-| `doc_id` | `string` | **Yes** | The ID of the document to replace |
-| `confirm` | `string` | **Yes** | Must be exactly `"YES"` to confirm the operation |
-| `file` | `file` | **Yes** | The new PDF file |
-
----
-
-### Wipe a Tenant Namespace
-
-**`POST /reset-vector-db`**
-
-> **Warning:** This permanently deletes **all training data for the specified `entity_id` namespace**. It does **not** affect any other client's data.
-
-**Request Form Data**
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `entity_id` | `string` | **Yes** | The client namespace to wipe |
-| `confirm` | `string` | **Yes** | Must be exactly `"YES"` to confirm the operation |
-
----
-
-## Manual Q&A Management Endpoints
-
-These endpoints allow the admin to manage specific question-answer pairs within a client namespace directly, without a PDF upload.
-
----
-
-### Search Existing Q&As
-
-**`POST /search-qa`**
-
-Searches a client's knowledge base for entries matching a query. Useful for verifying content before adding duplicates.
-
-**Request Body**
-
-```json
-{
-  "entity_id": "qorpy-business",
-  "query": "password reset",
-  "top_k": 5
-}
-```
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `entity_id` | `string` | **Yes** | The client namespace to search in |
-| `query` | `string` | **Yes** | The search term |
-| `top_k` | `integer` | No | Maximum number of results (default: 3) |
+**No parameters required.**
 
 **Response**
 
 ```json
 {
   "responseCode": "00",
-  "responseMessage": "Found 2 results",
+  "responseMessage": "Found 1 entities",
   "data": {
-    "matches": [
-      {
-        "id": "vector-uuid",
-        "score": 0.941,
-        "question": "How do I reset my password?",
-        "answer": "Click Forgot Password on the login screen.",
-        "category": "Account",
-        "section": "Login",
-        "document_id": "doc_123"
-      }
-    ]
+    "entities": ["policy"],
+    "count": 1
   }
 }
 ```
 
 ---
 
-### Add a Single Q&A
+## Quick Start Workflow
 
-**`POST /add-qa`**
+### Chat Integration
 
-Adds a single question-answer pair to a client's knowledge base.
+1. Call `POST /create-session` → store the returned `session_id`
+2. Call `POST /ask-question` with `entity_id`, `session_id`, and the user's question
+3. Display `data.answer` and optionally show `data.sources`
 
-**Request Body**
+### Document Upload
 
-```json
-{
-  "entity_id": "qorpy-business",
-  "question": "How do I reset my password?",
-  "answer": "Click 'Forgot password' on the login screen.",
-  "category": "Account",
-  "section": "Login"
-}
-```
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `entity_id` | `string` | **Yes** | The client namespace to add the Q&A into |
-| `question` | `string` | **Yes** | The question text |
-| `answer` | `string` | **Yes** | The answer text |
-| `category` | `string` | No | Category label (default: `"General"`) |
-| `section` | `string` | No | Section label (default: `"General"`) |
+1. Call `POST /insert-doc-vector-db` with `entity_id` and the file
+2. Poll `GET /task-status/{task_id}` every 3 seconds until `status` is `done` or `failed`
+3. New chunks are immediately queryable via `/ask-question`
 
 ---
 
-### Update a Q&A
+## Error Responses
 
-**`POST /update-qa`**
-
-Updates an existing Q&A entry by its vector ID within a client namespace.
-
-**Request Body**
+All errors use `responseCode: "01"`:
 
 ```json
 {
-  "entity_id": "qorpy-business",
-  "vector_id": "uuid-of-the-saved-vector",
-  "new_question": "Updated question?",
-  "new_answer": "Updated answer text."
+  "responseCode": "01",
+  "responseMessage": "RAG system not initialized"
 }
 ```
 
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `entity_id` | `string` | **Yes** | The client namespace the vector belongs to |
-| `vector_id` | `string` | **Yes** | The unique ID of the vector entry to update (obtained from `/search-qa`) |
-| `new_answer` | `string` | **Yes** | The replacement answer text |
-| `new_question` | `string` | No | The replacement question text (keeps original if omitted) |
+Common errors:
 
----
-
-### Bulk Add from Excel
-
-**`POST /bulk-add-qa`**
-
-Accepts an `.xlsx` file and bulk-imports Q&A pairs into a client namespace. Column A = Questions, Column B = Answers. Row 1 is treated as a header and will be skipped.
-
-**Headers**
-
-```
-Content-Type: multipart/form-data
-```
-
-**Request Form Data**
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `entity_id` | `string` | **Yes** | The client namespace to import entries into |
-| `file` | `file` | **Yes** | The `.xlsx` file to import |
-| `category` | `string` | No | Default category for all imported entries |
-| `section` | `string` | No | Default section for all imported entries |
-
-**Response**
-
-```json
-{
-  "responseCode": "00",
-  "responseMessage": "Successfully added 42 Q&A pairs",
-  "data": {
-    "document_id": "doc-uuid",
-    "pairs_added": 42
-  }
-}
-```
+| Scenario | `responseMessage` |
+|---|---|
+| System not ready | `"RAG system not initialized"` |
+| Invalid file type | `"Only PDF and TXT files are supported"` |
+| File too large | `"File too large (12.50 MB). Max allowed is 10 MB."` |
+| Missing confirmation | `"Must confirm with 'YES' to reset the vector database"` |
+| Task not found | `"Task ID not found"` |
