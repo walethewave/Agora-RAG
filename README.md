@@ -1,8 +1,8 @@
-<![CDATA[<div align="center">
+<div align="center">
 
 # Agora — AI Governance Document Q&A System
 
-**Production-Grade Retrieval-Augmented Generation (RAG) for the ETO AGORA Corpus**
+**Production-grade Retrieval-Augmented Generation (RAG) for the ETO AGORA Corpus**
 
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12+-3776AB?logo=python&logoColor=white)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
@@ -10,63 +10,120 @@
 [![Gemini](https://img.shields.io/badge/Gemini_2.5-Flash-4285F4?logo=google&logoColor=white)](https://ai.google.dev)
 [![Streamlit](https://img.shields.io/badge/Streamlit-Chat_UI-FF4B4B?logo=streamlit)](https://streamlit.io)
 [![Upstash](https://img.shields.io/badge/Upstash-Redis-00E9A3?logo=redis&logoColor=white)](https://upstash.com)
+[![Tests](https://img.shields.io/badge/Tests-43_passing-brightgreen)](tests/)
 
-*Upload governance documents, index them into Pinecone, and ask natural language questions — grounded answers with source citations, multi-turn conversation memory, and sub-query decomposition.*
+*Ask natural language questions over AI governance documents — grounded answers with source citations, multi-turn memory, and sub-query decomposition.*
 
 </div>
 
 ---
 
+## What This Is
+
+Agora is a RAG system built on the [ETO AGORA corpus](https://www.kaggle.com/datasets/umerhaddii/ai-governance-documents-data) — a collection of AI-relevant laws, regulations, and governance documents from jurisdictions worldwide. It ingests `.txt` and `.pdf` files, chunks and embeds them into a Pinecone vector database, and answers questions using Gemini 2.5 Flash with retrieved context.
+
+The focus is on **answer quality over UI polish**: every response is grounded in retrieved documents, source-attributed, and filtered through a strict governance analyst prompt that distinguishes between what a document *prohibits*, *requires*, *recommends*, or *permits*.
+
+---
+
 ## Table of Contents
 
-- [Assessment Alignment](#assessment-alignment)
-- [Dataset](#dataset)
-- [Architecture Overview](#architecture-overview)
-- [Key Design Decisions & Tradeoff Reasoning](#key-design-decisions--tradeoff-reasoning)
-- [Interface Usage Guide](#interface-usage-guide)
-- [File Structure & Responsibility Split](#file-structure--responsibility-split)
+- [Quick Start](#quick-start)
+- [How It Works](#how-it-works)
+- [Key Design Decisions](#key-design-decisions)
+- [Testing the System](#testing-the-system)
+- [Example Queries to Try](#example-queries-to-try)
+- [API Reference](#api-reference)
+- [File Structure](#file-structure)
 - [System Constants](#system-constants)
-- [API Endpoints](#api-endpoints)
 - [Prompt Engineering](#prompt-engineering)
-- [Conversation Memory Flow](#conversation-memory-flow)
-- [Installation & Setup](#installation--setup)
-- [Testing](#testing)
-- [Example Queries](#example-queries)
-- [Technology Stack](#technology-stack)
+- [Conversation Memory](#conversation-memory)
+- [Interface Guide](#interface-guide)
 - [Known Limitations](#known-limitations)
-- [Next Steps](#next-steps)
+- [What I Would Do Next](#what-i-would-do-next)
+- [Technology Stack](#technology-stack)
 
 ---
 
-## Assessment Alignment
+## Quick Start
 
-This repository is built to address the **ML Engineer Assessment** expectations across three pillars:
+### 1. Prerequisites
 
-| Criteria | How This System Addresses It |
+Before you run anything, make sure you have:
+
+| Requirement | Notes |
 |---|---|
-| **Correctness** | A fully runnable system that ingests `.txt`/`.pdf` governance documents, chunks them with overlap, embeds via Gemini, indexes into Pinecone, and answers questions end-to-end. 43 unit tests validate chunking, prompts, models, sub-query parsing, and error handling. |
-| **Retrieval Quality** | Sub-query decomposition splits complex questions into 1–5 focused queries for parallel retrieval. Top-4 chunks per sub-query, deduplicated by text content, ranked by cosine similarity. 1536D embeddings capture semantic nuance in legal/policy language. Conversation history (last 5 exchanges) is injected for multi-turn coherence. |
-| **Tradeoff Reasoning** | Every architectural choice is documented with explicit tradeoffs — chunk size (500 vs 1200 tokens), embedding dimension (1536 vs 768), sub-query latency (+2–3s for accuracy), session TTL (30 min), memory window (5 pairs), and namespace isolation (trust-based vs cryptographic). See [Key Design Decisions](#key-design-decisions--tradeoff-reasoning). |
+| Python 3.12+ | Check with `python --version` |
+| [`uv`](https://github.com/astral-sh/uv) | Fast Python package manager — `pip install uv` |
+| [Gemini API key](https://aistudio.google.com/app/apikey) | Free tier works for testing |
+| [Pinecone API key + index](https://app.pinecone.io) | Create a serverless index named `cyber`, dimension `1536`, metric `cosine` |
+| [Upstash Redis URL](https://upstash.com) | Free tier — create a database, copy the `rediss://` connection string |
 
-**Additional deliverables:**
-- Grounded answers with source citations (filename + cosine similarity score)
-- Admin panel for document upload, database inspection, and namespace management
-- Persistent chat UI with session history sidebar
-- Example queries with real retrieval results
+### 2. Install
+
+```bash
+git clone <repo-url>
+cd agora
+uv sync
+```
+
+### 3. Configure Environment
+
+Create a `.env` file in the project root:
+
+```env
+GEMINI_API_KEY=your_gemini_api_key_here
+PINECONE_API_KEY=your_pinecone_api_key_here
+PINECONE_INDEX_NAME=cyber
+REDIS_URL=rediss://default:your_token@your_host:6379
+```
+
+> **Tip:** All four variables are required. The system will fail loudly if any are missing — by design.
+
+### 4. Add Documents
+
+Download `.txt` files from the [AGORA dataset on Kaggle](https://www.kaggle.com/datasets/umerhaddii/ai-governance-documents-data). The system was tested on files `1.txt` through `10.txt` from the `agora/fulltext/` directory, which produce 36 chunks across the `policy` namespace.
+
+You can add documents two ways:
+
+**Via the Admin Panel (recommended):**
+1. Open `http://localhost:8501`
+2. Click ⚙️ Admin Panel in the sidebar
+3. Go to 📤 Upload Document
+4. Set namespace to `policy`, upload a `.txt` file
+5. Poll the task status until `done`
+
+**Via API:**
+```bash
+curl -X POST http://localhost:8000/insert-doc-vector-db \
+  -F "file=@1.txt" \
+  -F "entity_id=policy" \
+  -F "document_id=doc-001"
+```
+
+### 5. Run
+
+Open two terminals:
+
+```bash
+# Terminal 1 — Backend API
+.venv/bin/python -m uvicorn app:app --reload --port 8000
+
+# Terminal 2 — Chat Frontend
+.venv/bin/streamlit run chat.py
+```
+
+| Interface | URL |
+|---|---|
+| Chat UI | `http://localhost:8501` |
+| Admin Panel | `http://localhost:8501` → ⚙️ Admin Panel |
+| API Swagger docs | `http://localhost:8000/docs` |
 
 ---
 
-## Dataset
+## How It Works
 
-**Source:** [ETO AGORA AI Governance Documents Data](https://www.kaggle.com/datasets/umerhaddii/ai-governance-documents-data)
-
-The AGORA corpus is a living collection of AI-relevant laws, regulations, standards, and governance documents from the United States and around the world. This system was built and tested using **10 `.txt` files** from the `agora/fulltext/` directory (files `1.txt` through `10.txt`), producing **36 chunks** across the `policy` namespace.
-
-To extend the corpus, download additional `.txt` files from the dataset and upload them via the Admin Panel. They are added to the existing index without overwriting anything.
-
----
-
-## Architecture Overview
+Every question goes through five steps:
 
 ```
 User Question
@@ -83,21 +140,21 @@ User Question
 │  Step 2 · Parallel Embedding + Pinecone Retrieval       │
 │  ├─ Each sub-query → Gemini Embedding (1536D)           │
 │  ├─ Query Pinecone (top-4 chunks per sub-query, cosine) │
-│  └─ Deduplicate by text content (first 100 chars)       │
+│  └─ Deduplicate by first 100 chars of chunk text        │
 └──────────────────────────┬──────────────────────────────┘
                            ▼
 ┌─────────────────────────────────────────────────────────┐
 │  Step 3 · Context Assembly                              │
-│  ├─ Merge unique chunks, sort by relevance score        │
-│  ├─ Build source citations (filename, score)            │
+│  ├─ Sort unique chunks by cosine similarity score       │
+│  ├─ Build source citations (filename + score)           │
 │  └─ Inject last 5 conversation exchanges from Upstash   │
 └──────────────────────────┬──────────────────────────────┘
                            ▼
 ┌─────────────────────────────────────────────────────────┐
 │  Step 4 · Answer Synthesis (Gemini 2.5 Flash)           │
-│  ├─ System prompt: AI governance analyst persona        │
+│  ├─ System prompt: strict AI governance analyst persona │
 │  ├─ User template: history + context + question         │
-│  └─ Generate grounded answer with inline citations      │
+│  └─ Grounded answer with inline source citations        │
 └──────────────────────────┬──────────────────────────────┘
                            ▼
 ┌─────────────────────────────────────────────────────────┐
@@ -109,187 +166,298 @@ User Question
 
 ---
 
-## Key Design Decisions & Tradeoff Reasoning
+## Key Design Decisions
 
-### 1. Sub-Query Decomposition — Accuracy-First Approach
+These are the decisions I'd want to explain in a conversation — and the tradeoffs I made deliberately.
 
-Every user question passes through a Gemini API call that classifies intent and optionally decomposes:
+### Sub-Query Decomposition — Accuracy Over Speed
 
-| Input Type | Behavior | Example |
+Every question passes through a Gemini call that classifies intent before retrieval:
+
+| Input | Behavior | Example |
 |---|---|---|
-| **Conversational** | Returns `["__conversational__"]` — RAG skipped, Gemini answers directly | "hi", "thanks" |
-| **Single question** | Returns `["original question"]` — one retrieval pass | "What are the reporting requirements?" |
-| **Multi-part** | Returns `["sub-query 1", "sub-query 2", ...]` — parallel retrieval, results merged | "What are the barriers to AI adoption and who enforces compliance?" |
+| Conversational | `["__conversational__"]` — RAG skipped | "hi", "thanks", "what can you do?" |
+| Single question | `["original question"]` — one retrieval pass | "What are the reporting requirements?" |
+| Multi-part | `["sub-query 1", "sub-query 2", ...]` — parallel retrieval | "What are the barriers to adoption and who enforces compliance?" |
 
-**Why this matters:** If a user asks "What are the reporting requirements and who enforces them?", a single embedding query retrieves chunks about *either* reporting *or* enforcement, not both. Decomposition ensures both aspects are retrieved and answered.
+Without decomposition, asking "What are the reporting requirements and who enforces them?" produces embeddings that average across both topics — retrieval returns chunks about *either* reporting *or* enforcement but rarely both with high scores. Decomposition ensures full coverage.
 
-**Latency tradeoff:**
+**The latency tradeoff:**
 
-| Mode | Latency | Accuracy |
+| Mode | Latency | Accuracy on multi-part questions |
 |---|---|---|
-| Without sub-query decomposition | **~4 seconds** | Misses multi-faceted questions |
-| With sub-query decomposition | **~6–10 seconds** | Both aspects retrieved and answered |
+| Without decomposition | ~4s | Misses one aspect of the question |
+| With decomposition | ~6–10s | Both aspects retrieved and addressed |
 
-The +2–3 second overhead (one Gemini API call for classification) is a **deliberate engineering tradeoff** — accuracy over speed. For a governance Q&A system where correctness matters more than response time, this is justified.
+The extra 2–3 seconds is a deliberate choice. For a governance Q&A system where correctness matters more than speed, I'd always make this call.
 
 ---
 
-### 2. Embedding Dimension: 1536D
+### Embedding Dimension: 1536D
 
-`models/gemini-embedding-001` supports configurable output dimensions. **1536 was chosen** because:
+`models/gemini-embedding-001` supports configurable output dimensions. I chose 1536 because:
 
-- **Semantic precision:** Legal and policy language contains subtle distinctions (PROHIBITS vs. RECOMMENDS vs. PERMITS). 1536D captures these nuances better than 768D.
-- **Recommended quality/speed balance:** Google's recommended tradeoff for Gemini Embedding 2.
-- **Pinecone compatibility:** The free tier supports up to 1536D without additional cost.
-- **Future flexibility:** If experiments show 768D is sufficient for a specific corpus, change `EMBEDDING_DIMENSION` in `src/simplified_rag.py` and recreate the Pinecone index.
+- Policy language has subtle distinctions ("PROHIBITS" vs. "RECOMMENDS" vs. "PERMITS") that benefit from higher-dimensional representation.
+- Google recommends 1536 as the quality/speed tradeoff for this model.
+- Pinecone's free tier supports 1536D without additional cost.
 
-**Tradeoff:** Higher dimensions mean slightly larger index storage and marginally slower similarity search. For a corpus of 36 chunks (or even thousands), this is negligible.
+If experiments on a specific corpus show 768D is sufficient, change `EMBEDDING_DIMENSION` in `src/simplified_rag.py` and recreate the index. Storage overhead at this corpus size (36–thousands of chunks) is negligible.
 
 ---
 
-### 3. Chunk Size: 500 Tokens (Tuned for Short Documents)
+### Chunk Size: 500 Tokens (Tuned for Short Documents)
 
-The AGORA `.txt` files are short governance documents — typically 500–1,000 tokens each. The default 1,200-token chunk target would collapse each file into a single chunk, making retrieval meaningless (every query returns the same chunk).
+The AGORA `.txt` files are short — typically 500–1,000 tokens each. The default 1,200-token chunk target would collapse each file into a single chunk, making retrieval meaningless.
 
-| Setting | Chunk Target | Overlap | Result for 10 AGORA files |
+| Setting | Chunk target | Overlap | Result for 10 AGORA files |
 |---|---|---|---|
-| Default | 1,200 tokens | 20% (240 tokens) | ~10 chunks (one per file — no retrieval granularity) |
-| **Tuned** | **500 tokens** | **20% (100 tokens)** | **36 chunks (2–4 per file — meaningful retrieval)** |
+| Default | 1,200 tokens | 20% (240 tokens) | ~10 chunks — one per file, no retrieval granularity |
+| **Tuned** | **500 tokens** | **20% (100 tokens)** | **36 chunks — 2–4 per file, meaningful retrieval** |
 
-**Tradeoff:** Smaller chunks mean less context per chunk. Important context may be split across chunks in very long documents. The 20% overlap mitigates this by carrying the tail of the previous chunk into the next.
+The 20% overlap carries the tail of each chunk into the next, reducing the chance that a key sentence gets split at a boundary.
 
-> **Recommendation:** If you add larger documents (full legislation PDFs, 30+ pages), increase `CHUNK_TARGET_TOKENS` back to 1200.
+> If you add larger documents (30+ page PDFs), increase `CHUNK_TARGET_TOKENS` back to 1200.
 
 ---
 
-### 4. Conversation Memory — Upstash Redis (30-Minute TTL, 5-Message Window)
+### Conversation Memory: Upstash Redis (30-min TTL, 5-message window)
 
-**Why Upstash:** Multi-turn Q&A requires context. Without memory, every question is answered in isolation and the model cannot reference prior exchanges. Upstash Redis is serverless — zero infrastructure to manage, auto-scales, and provides sub-millisecond latency.
+Multi-turn Q&A requires context. Without memory, every follow-up question ("what about the EU version of that?") is answered in isolation.
 
-**Implementation** (`src/utils.py` — `ConversationMemory`):
+**Two separate Redis stores — by design:**
 
-| Parameter | Value | Rationale |
-|---|---|---|
-| **Storage key** | `session:{session_id}:history` | Redis list, one per session |
-| **Window size** | Last 5 user-assistant pairs (10 messages) | Keeps the Gemini context window focused. More than 5 exchanges would dilute retrieval relevance with old context. |
-| **TTL** | 30 minutes per session | Auto-expires inactive sessions. Governance Q&A sessions are typically short research bursts, not hours-long conversations. 30 min balances memory retention vs. Redis storage costs. |
-| **Injection** | Plain text in `{history}` placeholder | Formatted as `"User: ...\nAgora: ..."` and injected into `user_template` |
-
-**Two separate Redis stores (by design):**
-
-| Key Pattern | Purpose | TTL | Used By |
+| Key pattern | Purpose | TTL | Used by |
 |---|---|---|---|
-| `session:{id}:history` | Short-term model context (last 5 pairs) | **30 min** | RAG backend (`ConversationMemory`) |
-| `agora:{id}:messages` | Full chat UI history (all messages) | **7 days** | Streamlit frontend (session restoration) |
+| `session:{id}:history` | Model context (last 5 pairs) | 30 min | RAG backend |
+| `agora:{id}:messages` | Full UI history (all messages) | 7 days | Streamlit frontend |
 
-This separation means the model always gets a **clean 5-message window** for context, while the UI can restore the full conversation history when a user returns to a previous session.
+The model always gets a clean 5-message window for context. The UI can restore full conversation history when a user returns after days. These are different jobs and intentionally separate.
 
----
-
-### 5. Multi-Tenant Namespace Isolation
-
-A single Pinecone index (`cyber`) serves multiple document sets via **namespaces**. Each `entity_id` maps to a Pinecone namespace:
-
-- `entity_id=policy` → all AGORA governance documents
-- `entity_id=legal` → a different document set
-- Upload, query, and clear operations are fully namespace-isolated
-
-**Tradeoff:** Namespace isolation is **trust-based, not cryptographic**. The backend does not validate `entity_id` against any database — it trusts whatever the caller sends. For strict multi-tenancy with sensitive data, use separate Pinecone indexes.
+**Why a 5-message window:** More than 5 exchanges starts diluting retrieval relevance with stale context. For a governance research tool, users typically ask 3–5 related questions in a session, not 20.
 
 ---
 
-### 6. Deduplication by Text Content
+### Namespace Isolation (Trust-Based)
 
-When the same file is uploaded twice (different `document_id` UUIDs, same content), Pinecone stores duplicate vectors. The retrieval step deduplicates by the **first 100 characters of chunk text** rather than by vector ID, preventing the same content from appearing twice in the context window.
-
----
-
-### 7. Embedding Retry Logic
-
-The embedding function (`_embed_single`) retries up to 3 times with exponential backoff:
-
-- **HTTP 429** (rate limit) → wait `5 × attempt` seconds, retry
-- **Timeout** → wait `3 × attempt` seconds, retry
-- **Any other failure** → raise immediately (no silent zero-vector fallback)
-
-The previous implementation silently returned zero vectors on failure, causing Pinecone to reject uploads with *"Dense vectors must contain at least one non-zero value."* This is now fixed — failures raise explicitly so the background task reports `status: failed` with a clear error message.
+A single Pinecone index serves multiple document sets via namespaces. Upload, query, and clear operations are fully isolated by `entity_id`. This is **trust-based, not cryptographic** — the backend doesn't validate `entity_id` against a database. For sensitive multi-tenant deployments, use separate indexes.
 
 ---
 
-### 8. pdfplumber over PyPDF2
+### Deduplication by Text Content
 
-The original PyPDF2 implementation extracted only ~14,000 tokens from a 30-page legal PDF (expected: ~40,000–60,000) due to poor handling of multi-column layouts. `pdfplumber` was substituted for significantly better extraction. For the AGORA dataset (plain `.txt` files), this distinction does not apply, but the system supports both `.txt` and `.pdf` uploads.
+When the same file is uploaded twice (different UUIDs, same content), Pinecone stores duplicate vectors. The retrieval step deduplicates by the first 100 characters of chunk text, preventing the same content from inflating the context window with repetition.
 
 ---
 
-## Interface Usage Guide
+### Explicit Failure on Zero Vectors
 
-The system provides three interfaces — a **Chat UI**, an **Admin Dashboard**, and a **REST API (Swagger)**.
+The original `_embed_single` implementation silently returned zero vectors on failure. Pinecone rejects these with *"Dense vectors must contain at least one non-zero value."* The current implementation fails explicitly with exponential backoff retry (3 attempts: 5s, 10s, 15s for rate limits; 3s, 6s, 9s for timeouts). Silent failures in an embedding pipeline are worse than loud ones.
 
-### Chat UI — `http://localhost:8501`
+---
 
-| Feature | Behavior |
+### pdfplumber over PyPDF2
+
+PyPDF2 extracted ~14,000 tokens from a 30-page legal PDF where 40,000–60,000 was expected — poor handling of multi-column layouts. `pdfplumber` resolved this. For the AGORA `.txt` corpus this doesn't matter, but the system supports both formats for completeness.
+
+---
+
+## Testing the System
+
+### Run the Full Test Suite
+
+```bash
+# Validate syntax across all modules
+.venv/bin/python -m py_compile \
+  src/simplified_rag.py \
+  src/chat_engine.py \
+  src/utils.py \
+  src/models.py \
+  app.py \
+  chat.py \
+  pages/admin.py
+
+# Run all 43 unit tests
+.venv/bin/python -m unittest discover tests -v
+```
+
+Expected output: `43 tests, 0 failures, 0 errors`
+
+### What the Tests Cover
+
+| Area | What's validated |
 |---|---|
-| **Auto-session on load** | A session is created automatically when the app opens — the chat input is immediately available |
-| **New Chat** | Creates a new session only if the current session has ≥1 message. Clicking on an empty session is a no-op (prevents empty sessions accumulating) |
-| **History sidebar** | Lists all past sessions with ≥1 message, sorted newest first, loaded from Upstash. Click to restore full conversation |
-| **Source citations** | Each response shows an expandable "📄 Sources" section with filename and cosine similarity score |
-| **Delete session** | 🗑 button removes the session from Upstash and the sidebar |
-| **Session persistence** | Messages stored in Upstash under `agora:{session_id}:messages` with 7-day TTL |
-| **Namespace** | Controlled via `?entity_id=policy` query param (defaults to `policy`) |
+| Imports | All modules import cleanly with no dependency errors |
+| Constants | Chunk size, overlap, dimension, model names, API base URL |
+| Chunking | Token limits respected, overlap between adjacent chunks, metadata keys present, section heading detection, edge cases (empty input, whitespace-only, very short text) |
+| Prompts | System prompt content, user template has all three placeholders, sub-query template structure is correct |
+| PDF extraction | Valid PDF returns non-empty string; garbage bytes raise `Exception` |
+| Pydantic models | Valid requests pass; empty questions are rejected; `session_id` is optional; success/failure response shapes are correct |
+| Sub-query decomposition | Conversational marker returned for greetings; single questions pass through; multi-part questions split; Gemini timeout handled gracefully; malformed JSON falls back to original question |
+| Error handling | Unicode text processed correctly; whitespace-only input handled; repeated section headers don't break chunking |
+| Configuration | `.env.example` exists with all required keys; `prompts.yaml` loads and is valid YAML; missing API key raises an error |
 
-### Admin Dashboard — `http://localhost:8501` → ⚙️ Admin Panel
+### Manual End-to-End Test
 
-Three tabs:
+After uploading documents, verify the full pipeline:
 
-| Tab | What It Does |
-|---|---|
-| **📤 Upload Document** | Upload `.txt` files (max 10 MB). Specify namespace (e.g. `policy`). Runs as background task — returns `task_id`. Re-uploading with the same namespace adds without overwriting. |
-| **📊 Database Stats** | Leave namespace blank → global stats (total vectors, index fullness, dimension, all namespaces). Enter a namespace → stats for that namespace only. Shows per-namespace vector counts, index name, and dimension. |
-| **🗑️ Clear Database** | Enter namespace + type `YES` to confirm. Deletes all vectors in that namespace only — other namespaces unaffected. |
+```bash
+# 1. Create a session
+curl -X POST http://localhost:8000/create-session
+# → {"session_id": "abc-123"}
 
-### FastAPI Swagger — `http://localhost:8000/docs`
+# 2. Ask a question
+curl -X POST http://localhost:8000/ask-question \
+  -H "Content-Type: application/json" \
+  -d '{"entity_id": "policy", "question": "What are the reporting requirements for AI in the intelligence community?", "session_id": "abc-123"}'
 
-Interactive API documentation with request/response schemas for all endpoints. Useful for direct API testing and frontend integration reference.
+# 3. Check index stats
+curl http://localhost:8000/stats
+# → Shows total vectors, namespaces, dimension
+
+# 4. Poll a task (replace task_id with one from an upload response)
+curl http://localhost:8000/task-status/{task_id}
+# → {"status": "done"} or {"status": "running"}
+```
 
 ---
 
-## File Structure & Responsibility Split
+## Example Queries to Try
+
+These were tested against the 10-document AGORA corpus (`policy` namespace, 36 chunks). Paste them into the chat UI or hit the `/ask-question` endpoint directly.
+
+### Single-document retrieval
+
+```
+What reports are required on AI integration within the intelligence community?
+```
+*What to expect:* Specific reporting obligations, timelines, and the responsible parties cited from `10.txt` (cosine scores: 0.84, 0.81, 0.81, 0.78).
+
+```
+What is the Digital Development Infrastructure Plan?
+```
+*What to expect:* A grounded summary from `1.txt` with citations. Good test for single-document precision.
+
+```
+What enforcement mechanisms exist for AI compliance violations?
+```
+*What to expect:* The system should distinguish between what's mandated vs. recommended, and cite the relevant authority clearly.
+
+### Cross-document retrieval
+
+```
+What working groups or committees exist for AI governance?
+```
+*What to expect:* Cross-document retrieval pulling from multiple files — tests deduplication and ranking.
+
+```
+How do different jurisdictions approach AI transparency requirements?
+```
+*What to expect:* Multi-document synthesis with citations from several files. Good test for answer grounding across sources.
+
+### Sub-query decomposition (these will split into 2 sub-queries)
+
+```
+What are the barriers to AI adoption and who is responsible for enforcing compliance?
+```
+*What to expect:* Two distinct retrieval passes — one for adoption barriers, one for enforcement — then synthesised into a single coherent answer.
+
+```
+What obligations do government agencies have around AI, and what penalties exist for non-compliance?
+```
+*What to expect:* Similar multi-pass retrieval. Watch the returned `sub_queries` field in the API response to confirm decomposition fired.
+
+### Conversational short-circuit (RAG skipped entirely)
+
+```
+Hi, what can you help me with?
+```
+```
+Thanks, that was helpful.
+```
+*What to expect:* Direct response with no source citations. The `sources` array will be empty. This confirms the conversational detection is working correctly.
+
+### Edge cases worth testing
+
+```
+What does this document say about quantum computing?
+```
+*What to expect:* "The provided documents do not contain sufficient information to answer this question." — tests the grounding guardrail.
+
+```
+Summarise everything in the database.
+```
+*What to expect:* A broad summary with sources — tests retrieval breadth and the system's ability to handle open-ended queries.
+
+---
+
+## API Reference
+
+### Document Ingestion
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/insert-doc-vector-db` | Upload `.txt` or `.pdf`, chunk, embed, and upsert to Pinecone. Runs as a background task. Returns `task_id`. |
+| `POST` | `/replace-document-vectors` | Delete all vectors matching a filename, then re-index. Requires `confirm=YES`. |
+| `POST` | `/reset-vector-db` | Wipe all vectors in a namespace. Requires `confirm=YES`. |
+
+### Querying
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/create-session` | Generate a new `session_id`. No parameters. |
+| `POST` | `/ask-question` | RAG Q&A. Body: `{entity_id, question, session_id}`. Returns answer + sources. |
+
+### Observability
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/stats` | Global index stats: total vectors, dimension, per-namespace counts. |
+| `GET` | `/entities` | List all namespaces in the index. |
+| `GET` | `/task-status/{task_id}` | Poll a background upload task: `running`, `done`, or `failed`. |
+
+Full schemas and interactive testing: `http://localhost:8000/docs`
+
+---
+
+## File Structure
 
 ```
 .
 ├── app.py                    # FastAPI backend — all REST endpoints
-├── chat.py                   # Streamlit chat frontend (Agora UI)
+├── chat.py                   # Streamlit chat UI
 ├── main.py                   # Entry point stub
 ├── pages/
-│   └── admin.py              # Streamlit admin panel (upload, stats, clear)
+│   └── admin.py              # Admin panel (upload, stats, namespace clear)
 ├── src/
-│   ├── __init__.py           # Package marker
+│   ├── __init__.py
 │   ├── simplified_rag.py     # Core RAG: chunking, embedding, retrieval, orchestration
-│   ├── chat_engine.py        # GeminiChatClient: sub-query decomposition + text generation
+│   ├── chat_engine.py        # GeminiChatClient: sub-query decomposition + generation
 │   ├── utils.py              # ConversationMemory (Upstash Redis) + env helpers
 │   ├── models.py             # Pydantic request/response models
-│   └── prompts.yaml          # All prompt templates (system, user, sub-query)
+│   └── prompts.yaml          # All prompt templates — single source of truth
 ├── tests/
 │   └── test_rag_system.py    # 43 unit tests
 ├── .env                      # API keys (not committed)
+├── .env.example              # Template — copy this to .env and fill in your keys
 ├── .github/workflows/
 │   └── proddeploy.yml        # CI/CD pipeline
-├── requirements.txt          # Python dependencies
-├── pyproject.toml             # uv project config
-└── runtime.txt               # Python version (3.12)
+├── requirements.txt
+├── pyproject.toml
+└── runtime.txt               # Python 3.12
 ```
 
-| File | Responsibility |
+**Responsibility split:**
+
+| File | What it owns |
 |---|---|
-| `app.py` | HTTP layer only — validates requests, delegates to `SimplifiedRAG`, returns JSON responses. Includes Mangum adapter for AWS Lambda deployment. |
-| `src/simplified_rag.py` | PDF/TXT extraction, recursive chunking (500-token target, 20% overlap), Gemini embeddings (1536D), Pinecone upsert/query, RAG orchestration with parallel sub-query retrieval, deduplication, and context assembly. |
-| `src/chat_engine.py` | `GeminiChatClient` — sub-query decomposition via Gemini with JSON parsing, regex fallback, and timeout handling. Also handles answer synthesis with configurable temperature and token limits. |
-| `src/utils.py` | `ConversationMemory` class (Upstash Redis, 30-min TTL, 5-message window). `.env` loading and direct key reading helpers. |
-| `src/models.py` | Pydantic models: `QuestionRequest`, `CreateSessionRequest`, `APIResponse` — the standard request/response envelope. |
-| `src/prompts.yaml` | Single source of truth for all prompts — system prompt (AI governance analyst persona), user template (history + context + question), sub-query decomposition template. |
-| `chat.py` | Streamlit chat UI with auto-session creation, persistent session history sidebar (Upstash-backed, 7-day TTL), source citation display, and session management (create, restore, delete). |
-| `pages/admin.py` | Streamlit admin UI — three tabs for document upload, database stats (with per-namespace breakdown), and namespace clearing. |
+| `app.py` | HTTP layer only — validates requests, delegates to `SimplifiedRAG`, returns JSON. Mangum adapter included for AWS Lambda. |
+| `src/simplified_rag.py` | PDF/TXT extraction, recursive chunking, Gemini embeddings, Pinecone upsert/query, RAG orchestration, deduplication, context assembly. |
+| `src/chat_engine.py` | Sub-query decomposition (Gemini call → JSON parsing → regex fallback → timeout handling). Answer synthesis with configurable temperature. |
+| `src/utils.py` | `ConversationMemory` class (Upstash Redis, TTL management, window trimming). Env loading helpers. |
+| `src/models.py` | Pydantic models: `QuestionRequest`, `CreateSessionRequest`, `APIResponse`. |
+| `src/prompts.yaml` | System prompt, user template, and sub-query decomposition template — all in one place, loaded at startup. |
+| `chat.py` | Chat UI: auto-session creation, session sidebar, source citation display, session restore and delete. |
+| `pages/admin.py` | Three-tab admin: upload, stats, and namespace management. |
 
 ---
 
@@ -298,108 +466,73 @@ Interactive API documentation with request/response schemas for all endpoints. U
 Defined in `src/simplified_rag.py`:
 
 ```python
-CHUNK_TARGET_TOKENS  = 500            # Tuned for short AGORA .txt files (~500-1000 tokens each)
-CHUNK_OVERLAP_PCT    = 0.20           # 20% overlap = 100 tokens carried from previous chunk tail
-CHUNK_OVERLAP_TOKENS = 100            # Derived: int(500 * 0.20)
-EMBEDDING_DIMENSION  = 1536           # Gemini Embedding 2 — quality/speed tradeoff for legal text
+CHUNK_TARGET_TOKENS    = 500       # Tuned for short AGORA .txt files
+CHUNK_OVERLAP_PCT      = 0.20      # 20% overlap = ~100 token tail carry-over
+CHUNK_OVERLAP_TOKENS   = 100       # int(500 * 0.20)
+EMBEDDING_DIMENSION    = 1536      # Gemini Embedding 2 — quality/speed balance
 GEMINI_EMBEDDING_MODEL = "models/gemini-embedding-001"
 GEMINI_TEXT_MODEL      = "models/gemini-2.5-flash"
 GEMINI_API_BASE        = "https://generativelanguage.googleapis.com/v1beta"
 ```
 
-Defined in `src/utils.py` — `ConversationMemory`:
+Defined in `src/utils.py`:
 
 ```python
-TTL          = 1800    # 30 minutes — auto-expire inactive sessions
-MAX_MESSAGES = 5       # Last 5 Q&A pairs (10 messages total) injected as context
+TTL          = 1800   # 30 minutes — auto-expire inactive sessions
+MAX_MESSAGES = 5      # Last 5 Q&A pairs injected into model context
 ```
-
----
-
-## API Endpoints
-
-### Document Ingestion
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/insert-doc-vector-db` | Upload `.txt` or `.pdf`, chunk, embed, upsert to Pinecone. Runs in background. Returns `task_id`. |
-| `POST` | `/replace-document-vectors` | Delete vectors matching filename, re-index new file. Requires `confirm=YES`. |
-| `POST` | `/reset-vector-db` | Wipe all vectors in a namespace. Requires `confirm=YES`. |
-
-### Querying
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/create-session` | Generate a new `session_id`. No parameters required. |
-| `POST` | `/ask-question` | RAG Q&A. Body: `{entity_id, question, session_id}`. Returns answer + sources. |
-
-### Observability
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/stats` | Global stats: total vectors, index name, dimension, per-namespace vector counts. |
-| `GET` | `/entities` | List all namespaces (entity_ids) in the index. |
-| `GET` | `/task-status/{task_id}` | Poll background upload task. Returns `running`, `done`, or `failed`. |
-
-### Removed Endpoints
-
-- `/ask-question-stream` — SSE streaming was removed. The ~6s latency is dominated by Gemini API calls, not response transmission, so streaming added complexity without meaningful UX benefit.
-
-> **Full API documentation** with request/response examples: see [`API_DOCUMENTATION.md`](API_DOCUMENTATION.md)
 
 ---
 
 ## Prompt Engineering
 
-Three templates in `src/prompts.yaml`, loaded at startup via `yaml.safe_load`:
+All templates live in `src/prompts.yaml` and are loaded once at startup via `yaml.safe_load`. They are not hardcoded anywhere in the Python files — changing a prompt does not require a code change or restart.
 
-### `system_prompt`
+### `system_prompt` — The Governance Analyst Persona
 
-Defines the AI governance analyst persona with strict grounding rules:
+Defines strict grounding rules:
 
-- Answer **ONLY** from retrieved context — no external knowledge
-- Identify jurisdiction and document type before stating obligations
-- Quote exact figures, thresholds, and deadlines
-- Distinguish between PROHIBITS / REQUIRES / RECOMMENDS / PERMITS
-- 5 verification checkpoints applied before every answer
+- Answer **only** from retrieved context. No external knowledge, no hallucination.
+- Identify jurisdiction and document type before stating any obligations.
+- Quote exact figures, thresholds, and deadlines verbatim.
+- Distinguish clearly between PROHIBITS / REQUIRES / RECOMMENDS / PERMITS.
 - If context is insufficient: *"The provided documents do not contain sufficient information to answer this question."*
 
-### `user_template`
+This persona was designed because governance documents make fine-grained normative distinctions that a generic assistant prompt will flatten. "The document discusses AI reporting" is not useful. "Section 4(b) *requires* agencies to submit quarterly reports within 30 days of quarter end" is.
 
-Injected per question with three placeholders:
+### `user_template` — Per-Question Injection
 
-- `{history}` — last 5 exchanges from Upstash Redis (or "No previous conversation.")
-- `{context}` — top-ranked unique chunks from Pinecone retrieval
+Three placeholders filled at query time:
+
+- `{history}` — last 5 exchanges from Redis (or "No previous conversation.")
+- `{context}` — top-ranked unique chunks from Pinecone, sorted by score
 - `{question}` — the user's original question
 
-### `sub_query_template`
+### `sub_query_template` — Decomposition Instructions
 
-Used by `GeminiChatClient.generate_sub_queries()`:
-
-- Returns a JSON array of 1–5 strings
-- Includes split/keep-together rules for governance topics
-- Handles conversational input → `["__conversational__"]`
+Instructs Gemini to return a JSON array of 1–5 strings. Includes explicit rules for when to split and when to keep together, plus the `__conversational__` sentinel for non-document queries.
 
 ---
 
-## Conversation Memory Flow
+## Conversation Memory
 
 ```
 User sends message
         │
         ▼
-chat.py saves to Upstash ──► agora:{session_id}:messages  (full UI history, 7-day TTL)
+chat.py → saves to Upstash ──► agora:{session_id}:messages  (full UI history, 7-day TTL)
         │
         ▼
-chat.py calls POST /ask-question with session_id
+chat.py → POST /ask-question with session_id
         │
         ▼
-SimplifiedRAG.ask_questions() calls ConversationMemory.get_history(session_id)
-  → reads from ──► session:{session_id}:history  (last 5 pairs, 30-min TTL)
-  → formats as plain text: "User: ...\nAgora: ..."
+SimplifiedRAG.ask_questions()
+  → ConversationMemory.get_history(session_id)
+  → reads ──► session:{session_id}:history  (last 5 pairs, 30-min TTL)
+  → formats: "User: ...\nAgora: ..."
         │
         ▼
-History injected into user_template {history} placeholder
+History injected into {history} placeholder in user_template
         │
         ▼
 Gemini generates answer with conversation context
@@ -413,132 +546,26 @@ ConversationMemory.save(session_id, question, answer)
 
 ---
 
-## Installation & Setup
+## Interface Guide
 
-### Prerequisites
+### Chat UI — `http://localhost:8501`
 
-- Python 3.12+
-- [`uv`](https://github.com/astral-sh/uv) package manager
-- [Google Gemini API key](https://aistudio.google.com/app/apikey)
-- [Pinecone API key](https://app.pinecone.io) + index named `cyber` (dimension: 1536, metric: cosine)
-- [Upstash Redis URL](https://upstash.com)
-
-### Install
-
-```bash
-uv sync
-```
-
-### Environment
-
-Create `.env` in project root:
-
-```env
-GEMINI_API_KEY=your_gemini_api_key
-PINECONE_API_KEY=your_pinecone_api_key
-PINECONE_INDEX_NAME=cyber
-REDIS_URL=rediss://default:your_token@your_host:6379
-```
-
-### Run
-
-**Terminal 1 — Backend:**
-```bash
-.venv/bin/python -m uvicorn app:app --reload --port 8000
-```
-
-**Terminal 2 — Frontend:**
-```bash
-.venv/bin/streamlit run chat.py
-```
-
-| Interface | URL |
+| Feature | Behaviour |
 |---|---|
-| Chat UI | `http://localhost:8501` |
-| Admin Panel | `http://localhost:8501` → ⚙️ Admin Panel |
-| API Swagger | `http://localhost:8000/docs` |
+| Auto-session | A session is created automatically when the app opens — no setup needed |
+| New Chat | Creates a new session only if the current session has at least one message |
+| History sidebar | All past sessions with messages, sorted newest first. Click any to restore. |
+| Source citations | Expandable "📄 Sources" section under each answer — filename and cosine score |
+| Delete session | 🗑 button removes session from Upstash and the sidebar |
+| Namespace | Set via `?entity_id=policy` query param (defaults to `policy`) |
 
-### Adding More Documents
+### Admin Panel — `http://localhost:8501` → ⚙️ Admin Panel
 
-1. Download additional `.txt` files from the [AGORA dataset](https://www.kaggle.com/datasets/umerhaddii/ai-governance-documents-data)
-2. Open the Admin Panel → 📤 Upload Document tab
-3. Set `Index (Namespace)` to `policy` (or any namespace)
-4. Upload the `.txt` file
-5. Poll `/task-status/{task_id}` until `status: done`
-6. New chunks are immediately queryable
-
----
-
-## Testing
-
-```bash
-# Syntax validation
-.venv/bin/python -m py_compile src/simplified_rag.py src/chat_engine.py src/utils.py src/models.py app.py chat.py pages/admin.py
-
-# Full test suite (43 tests)
-.venv/bin/python -m unittest discover tests -v
-```
-
-**Test coverage:**
-
-| Area | What's Tested |
+| Tab | What it does |
 |---|---|
-| Imports | All modules import without errors |
-| Constants | Chunk size, overlap, dimension, model names, API base |
-| Recursive chunking | Token limits, overlap between adjacent chunks, metadata keys, section heading detection, empty/short/whitespace text |
-| Prompt loading | System prompt content, user template placeholders, sub-query template structure |
-| PDF extraction | Valid PDF returns string, garbage bytes raise Exception |
-| Pydantic models | Valid requests, empty question rejection, optional session_id, success/failure responses |
-| Sub-query decomposition | Conversational marker, single question, multi-question split, Gemini timeout fallback, malformed JSON fallback |
-| Error handling | Unicode text, whitespace-only input, repeated section headers |
-| Configuration | `.env.example` exists with required keys, `prompts.yaml` valid, API key requirement enforced |
-
----
-
-## Example Queries
-
-```
-Q: "What reports are required on AI integration within the intelligence community?"
-→ Response type: RAG
-→ Sources: 10.txt (scores: 0.842, 0.811, 0.807, 0.778)
-→ Sub-queries: 1 (single focused question)
-
-Q: "What is the Digital Development Infrastructure Plan?"
-→ Response type: RAG
-→ Sources: 1.txt (scores: 0.682, 0.664)
-→ Sub-queries: 1
-
-Q: "What are the barriers to AI adoption and who enforces compliance?"
-→ Response type: RAG
-→ Sources: multiple files (cross-document retrieval)
-→ Sub-queries: 2 (decomposed into separate retrieval passes)
-
-Q: "What working groups exist for AI governance?"
-→ Response type: RAG
-→ Sources: multiple files
-
-Q: "Hi, what can you help me with?"
-→ Response type: Conversational short-circuit
-→ Sources: none (RAG skipped entirely)
-→ Sub-queries: ["__conversational__"]
-```
-
----
-
-## Technology Stack
-
-| Component | Technology | Why |
-|---|---|---|
-| Backend | FastAPI + Uvicorn | Async, type-safe, auto-documented. Mangum adapter for AWS Lambda. |
-| Embeddings | Gemini Embedding 2 (1536D) | Best semantic quality for policy/legal language at this dimension |
-| Text Generation | Gemini 2.5 Flash | Fast, cost-effective, sufficient quality for grounded Q&A |
-| Vector Store | Pinecone (cosine, serverless) | Managed, namespace isolation, no infrastructure to maintain |
-| Session Memory (model) | Upstash Redis (30-min TTL) | Serverless, last-5-message window for Gemini context injection |
-| Session History (UI) | Upstash Redis (7-day TTL) | Full conversation restoration in chat sidebar |
-| Frontend | Streamlit | Rapid development, built-in chat components, no JS framework needed |
-| Chunking | Tiktoken `cl100k_base` | Industry-standard token counting, matches OpenAI tokenization |
-| PDF Parsing | pdfplumber | Handles complex multi-column layouts better than PyPDF2 |
-| TXT Parsing | Python built-in (UTF-8 decode) | Zero-dependency for plain text files |
+| 📤 Upload Document | Upload `.txt` files (max 10 MB). Returns `task_id`. Re-uploading adds without overwriting. |
+| 📊 Database Stats | Leave namespace blank for global stats; enter a namespace for per-namespace counts. |
+| 🗑️ Clear Database | Enter namespace + type `YES` to confirm. Deletes only that namespace — others are untouched. |
 
 ---
 
@@ -546,29 +573,62 @@ Q: "Hi, what can you help me with?"
 
 | # | Limitation | Impact |
 |---|---|---|
-| 1 | **Scanned PDFs** | pdfplumber cannot extract text from image-based PDFs. Use text-based PDFs or `.txt` files. |
-| 2 | **Short documents** | Files under 500 tokens produce a single chunk — retrieval works but there is nothing to differentiate between. |
-| 3 | **Gemini rate limits** | Free tier has per-minute limits. Large batch uploads (50+ chunks) may hit 429 errors — retry logic handles this with exponential backoff. |
-| 4 | **30-minute session TTL** | The RAG backend's conversation context expires after 30 min of inactivity. The UI history (7-day TTL) persists, but the model loses context from sessions older than 30 min. |
-| 5 | **Namespace isolation** | Trust-based, not cryptographic. Do not use for sensitive multi-tenant data without separate indexes. |
-| 6 | **Sub-query limit** | Maximum 5 sub-queries per input — design choice to control API cost and latency. |
+| 1 | **Scanned PDFs** | `pdfplumber` cannot extract text from image-based PDFs. Use text-based PDFs or `.txt` files. |
+| 2 | **Short documents** | Files under 500 tokens produce a single chunk. Retrieval works but there's nothing to differentiate between. |
+| 3 | **Gemini rate limits** | Free tier has per-minute limits. Large uploads (50+ chunks) may hit 429 errors — exponential backoff handles retries, but large batches will be slow. |
+| 4 | **30-minute model context TTL** | The RAG backend's conversation context expires after 30 minutes of inactivity. The UI history (7-day TTL) persists, but Gemini loses context from sessions older than 30 minutes. |
+| 5 | **Trust-based namespace isolation** | `entity_id` is not validated server-side. Do not use this for sensitive multi-tenant data without separate Pinecone indexes. |
+| 6 | **5 sub-query maximum** | Hard cap on decomposition — a deliberate choice to control API cost and latency. Extremely complex questions may not be fully decomposed. |
+| 7 | **No streaming** | `/ask-question-stream` was removed. The ~6s latency is dominated by Gemini API calls, not response transmission. Streaming added complexity without meaningful UX benefit at this scale. |
 
 ---
 
-## Next Steps
+## What I Would Do Next
 
-1. **Hybrid search** — Add BM25 keyword search alongside semantic search for better recall on exact terms
-2. **Reranking** — Add a cross-encoder reranker to improve top-k precision
-3. **Larger corpus** — Upload all 600+ AGORA documents for full coverage
-4. **Latency optimization** — Cache embeddings for repeated queries; skip sub-query decomposition for single questions locally
-5. **Metadata filtering** — Use Pinecone metadata filters to scope queries by jurisdiction or document type
-6. **Analytics** — Track query latency, source hit rates, and user satisfaction metrics
+Given more time, in rough priority order:
+
+1. **Hybrid search** — BM25 keyword search alongside semantic search. Governance documents contain exact legal terms that semantic search alone can miss ("Section 4(b)(ii)", specific statute numbers). A weighted combination would improve recall significantly.
+
+2. **Cross-encoder reranking** — Replace cosine similarity ranking with a cross-encoder (e.g. Cohere Rerank or a local `cross-encoder/ms-marco-MiniLM`) to improve top-k precision. The initial retrieval uses bi-encoder embeddings for speed; reranking on the top 20 results would sharpen the final 4.
+
+3. **Metadata filtering** — Pinecone supports metadata filters. Adding `jurisdiction`, `document_type`, and `year` as chunk metadata would let users scope queries ("only EU regulations", "only documents from 2023+") without changing the retrieval architecture.
+
+4. **Larger corpus** — The system was tested on 10 of the 600+ AGORA documents. Uploading the full corpus is straightforward (Admin Panel batch upload or a script calling `/insert-doc-vector-db` in a loop) and would produce a much richer retrieval surface.
+
+5. **Query-level caching** — Cache embeddings for repeated queries. Pinecone queries with identical vectors are common in production (users often ask the same questions). A Redis cache keyed on the embedding vector would cut latency for repeat queries to near-zero.
+
+6. **Evaluation harness** — Build a small ground-truth QA set (20–30 questions with known answers) and score the system on retrieval recall@k and answer accuracy. Right now, quality is assessed qualitatively. A quantitative eval loop would make it easier to validate whether changes (chunk size, decomposition threshold, top-k) actually help.
+
+---
+
+## Technology Stack
+
+| Component | Technology | Why |
+|---|---|---|
+| Backend | FastAPI + Uvicorn | Async, type-safe, auto-documented. Mangum adapter for AWS Lambda if needed. |
+| Embeddings | Gemini Embedding 2 (1536D) | Best semantic quality for policy/legal language at this dimension and cost point. |
+| Text generation | Gemini 2.5 Flash | Fast and cost-effective. Sufficient quality for grounded Q&A where the heavy lifting is done by retrieval. |
+| Vector store | Pinecone (cosine, serverless) | Managed, namespace isolation, no infrastructure. Free tier handles this corpus size comfortably. |
+| Session memory (model) | Upstash Redis (30-min TTL) | Serverless. Sub-millisecond latency for the 5-message context window injection. |
+| Session history (UI) | Upstash Redis (7-day TTL) | Same infrastructure, different job — full conversation restoration in sidebar. |
+| Frontend | Streamlit | Rapid development, built-in chat components. The assessment prioritises retrieval quality over UI; Streamlit gets a working interface built quickly. |
+| Token counting | Tiktoken `cl100k_base` | Industry-standard, consistent with how chunk sizes are actually measured. |
+| PDF parsing | pdfplumber | Handles multi-column layouts. PyPDF2 was dropping ~65% of content on complex legal PDFs. |
+
+---
+
+## Assumptions Made
+
+- The primary use case is researchers and policy analysts asking focused questions, not general-purpose chatbot usage. This justifies the strict grounding prompt and the accuracy-over-latency tradeoffs.
+- Session TTLs (30 min for model context, 7 days for UI history) are appropriate for a research tool. These would be configurable parameters in a production deployment.
+- The AGORA dataset files are short (500–1,000 tokens each). The 500-token chunk size was tuned for this. If you add longer documents, adjust `CHUNK_TARGET_TOKENS` accordingly.
 
 ---
 
 <div align="center">
 
-**Last Updated:** May 2026 · **System Version:** 2.0 · **Dataset:** ETO AGORA (CC0 Public Domain) · **Corpus Tested:** 10 documents, 36 chunks, `policy` namespace
+**Last updated:** May 2026 · **Version:** 2.0 · **Dataset:** ETO AGORA (CC0 Public Domain)
+
+*Tested on 10 documents · 36 chunks · `policy` namespace*
 
 </div>
-]]>

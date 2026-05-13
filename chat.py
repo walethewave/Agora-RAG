@@ -10,6 +10,13 @@ from src.simplified_rag import SimplifiedRAG
 # ── RAG System Initialization ──────────────────────────────────────────────────
 @st.cache_resource
 def get_rag_system():
+    import os
+    # Inject Streamlit secrets into env vars for SimplifiedRAG (cloud deployment)
+    for key in ["GEMINI_API_KEY", "PINECONE_API_KEY", "PINECONE_INDEX_NAME", "REDIS_URL"]:
+        try:
+            os.environ.setdefault(key, st.secrets[key])
+        except (KeyError, FileNotFoundError):
+            pass
     try:
         return SimplifiedRAG()
     except Exception as e:
@@ -29,8 +36,13 @@ st.set_page_config(
 # ── Upstash Redis ──────────────────────────────────────────────────────────────
 @st.cache_resource
 def get_redis():
-    env_file = load_project_env()
-    url = read_env_value("REDIS_URL", env_file)
+    # Try Streamlit secrets first (for cloud deployment), then .env file
+    url = None
+    try:
+        url = st.secrets["REDIS_URL"]
+    except (KeyError, FileNotFoundError):
+        env_file = load_project_env()
+        url = read_env_value("REDIS_URL", env_file)
     if not url:
         return None
     try:
