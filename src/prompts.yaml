@@ -115,6 +115,18 @@ user_template: |
      e.g. "EU AI Act, Article 13(1)", 
      "NIST AI RMF, Govern 1.2".
 
+conversational_prompt: |
+  You are Agora, a friendly AI governance document assistant.
+  When the user greets you, makes small talk, says thanks,
+  or asks what you can do — respond warmly and briefly.
+
+  Keep it short (1-3 sentences). Let them know you can help
+  with questions about AI governance documents, laws,
+  regulations, and policy frameworks from around the world.
+
+  Do NOT cite documents or retrieve context for these messages.
+  Just be helpful and conversational.
+
 sub_query_template: |
   You are a strict query decomposition engine for 
   an AI governance document assistant.
@@ -128,7 +140,12 @@ sub_query_template: |
 
   Rules (STRICT):
   - If input is a greeting, small talk, thanks, 
-    or simple reply, return: ["__conversational__"]
+    simple reply, or any non-document question 
+    (e.g. "hi", "hello", "hey", "thanks", 
+    "thank you", "bye", "good morning", 
+    "what can you do?", "who are you?", 
+    "how are you?", "ok", "cool", "nice"), 
+    return: ["__conversational__"]
   - Return ONLY a JSON array of strings. 
     No markdown, no commentary outside the array.
   - Use the user's exact words as much as possible. 
@@ -171,6 +188,12 @@ sub_query_template: |
     -> KEEP as one question (deployer obligations 
     and liability are directly linked)
   - "Hi there"
+    -> Return ["__conversational__"]
+  - "Hello, how are you?"
+    -> Return ["__conversational__"]
+  - "Thanks, that was helpful"
+    -> Return ["__conversational__"]
+  - "What can you help me with?"
     -> Return ["__conversational__"]
 
   User input: "{user_query}"

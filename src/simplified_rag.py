@@ -99,6 +99,7 @@ class SimplifiedRAG:
             self.system_prompt = prompts_config.get("system_prompt", "").strip()
             self.user_template = prompts_config.get("user_template", "").strip()
             self.sub_query_template = prompts_config.get("sub_query_template", "").strip()
+            self.conversational_prompt = prompts_config.get("conversational_prompt", "").strip()
             logger.info("[CONFIG] Loaded prompt templates from src/prompts.yaml")
 
             # Redis conversation memory (Upstash)
@@ -611,7 +612,7 @@ class SimplifiedRAG:
                     f"Respond naturally and conversationally."
                 )
                 answer = self.chat_client.generate_text(
-                    system_prompt=self.system_prompt,
+                    system_prompt=self.conversational_prompt or self.system_prompt,
                     user_message=conv_message,
                     max_tokens=200
                 )

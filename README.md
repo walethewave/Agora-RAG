@@ -14,6 +14,8 @@
 
 *Ask natural language questions over AI governance documents — grounded answers with source citations, multi-turn memory, and sub-query decomposition.*
 
+🔗 **[Live Demo](https://agora-rag.streamlit.app/)**
+
 </div>
 
 ---
@@ -115,7 +117,8 @@ Open two terminals:
 
 | Interface | URL |
 |---|---|
-| Chat UI | `http://localhost:8501` |
+| Live Demo | https://agora-rag.streamlit.app/ |
+| Chat UI (local) | `http://localhost:8501` |
 | Admin Panel | `http://localhost:8501` → ⚙️ Admin Panel |
 | API Swagger docs | `http://localhost:8000/docs` |
 
