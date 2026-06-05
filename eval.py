@@ -25,6 +25,12 @@ JUDGE_PROMPT_TEMPLATE = _prompts["judge_prompt"].strip()
 
 # -- RAG Initialization (cached -- only runs once per session) ----------------
 def get_rag():
+    import os
+    for key in ["GEMINI_API_KEY", "PINECONE_API_KEY", "PINECONE_INDEX_NAME", "REDIS_URL"]:
+        try:
+            os.environ.setdefault(key, st.secrets[key])
+        except (KeyError, FileNotFoundError):
+            pass
     return SimplifiedRAG()
 
 
