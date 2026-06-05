@@ -199,3 +199,22 @@ sub_query_template: |
   User input: "{user_query}"
 
   Respond with JSON array ONLY.
+
+judge_system_prompt: |
+  You are a strict but fair evaluation judge for a RAG system.
+  You evaluate answers based solely on what was expected vs what was returned.
+  Never add commentary outside the required format.
+
+judge_prompt: |
+  Evaluate the ACTUAL answer against the EXPECTED answer on 4 dimensions.
+  Reply in EXACTLY this format with no extra text before or after:
+
+  RELEVANCE: YES or NO -- did the actual answer address what was asked?
+  CORRECTNESS: YES or NO -- are the key facts accurate and consistent with the expected answer? (extra detail is fine, penalise only factual errors or contradictions)
+  COMPLETENESS: YES or NO -- did the actual answer cover all the key points in the expected answer?
+  GROUNDING: YES or NO -- does the answer reference specific documents, sections, or legislation rather than speaking in generalities?
+  REASONING: one sentence explaining your overall verdict
+
+  EXPECTED: {expected}
+
+  ACTUAL: {actual}
