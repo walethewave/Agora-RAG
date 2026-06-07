@@ -121,15 +121,25 @@ class GeminiChatClient:
             result = response.json()
             candidates = result.get("candidates", [])
             if not candidates:
-                raise Exception("No candidates in Gemini response")
+                # Prompt was blocked before any candidate was generated
+                blocked = result.get("promptFeedback", {}).get("blockReason", "UNKNOWN")
+                return f"I'm unable to respond to that request ({blocked})."
 
-            parts = candidates[0].get("content", {}).get("parts", [])
-            if not parts:
+            candidate = candidates[0]
+            finish_reason = candidate.get("finishReason", "")
+
+            # Check finish_reason AFTER extracting text so partial safety-blocked
+            # responses (where Gemini returns truncated text + SAFETY) are discarded
+            parts = candidate.get("content", {}).get("parts", [])
+            answer_text = parts[0].get("text", "").strip() if parts else ""
+
+            if finish_reason in ("SAFETY", "RECITATION", "OTHER"):
+                return "I'm unable to respond to that request."
+
+            if not answer_text:
                 raise Exception("No parts in Gemini response")
 
-            answer_text = parts[0].get("text", "").strip()
-            if not answer_text:
-                raise Exception("Empty answer text from Gemini")
+            # finish_reason STOP or MAX_TOKENS — return whatever was generated
             return answer_text
         except requests.exceptions.Timeout:
             raise Exception("Gemini API timeout after 60 seconds")
