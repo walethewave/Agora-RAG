@@ -127,16 +127,18 @@ class GeminiChatClient:
 
             candidate = candidates[0]
             finish_reason = candidate.get("finishReason", "")
-            if finish_reason == "SAFETY":
-                return "I'm unable to respond to that request due to safety restrictions."
 
+            # Check finish_reason AFTER extracting text so partial safety-blocked
+            # responses (where Gemini returns truncated text + SAFETY) are discarded
             parts = candidate.get("content", {}).get("parts", [])
-            if not parts:
+            answer_text = parts[0].get("text", "").strip() if parts else ""
+
+            if finish_reason in ("SAFETY", "RECITATION", "OTHER"):
+                return "I'm unable to respond to that request."
+
+            if not answer_text:
                 raise Exception("No parts in Gemini response")
 
-            answer_text = parts[0].get("text", "").strip()
-            if not answer_text:
-                raise Exception("Empty answer text from Gemini")
             return answer_text
         except requests.exceptions.Timeout:
             raise Exception("Gemini API timeout after 60 seconds")
