@@ -121,9 +121,16 @@ class GeminiChatClient:
             result = response.json()
             candidates = result.get("candidates", [])
             if not candidates:
-                raise Exception("No candidates in Gemini response")
+                # Prompt was blocked before any candidate was generated
+                blocked = result.get("promptFeedback", {}).get("blockReason", "UNKNOWN")
+                return f"I'm unable to respond to that request ({blocked})."
 
-            parts = candidates[0].get("content", {}).get("parts", [])
+            candidate = candidates[0]
+            finish_reason = candidate.get("finishReason", "")
+            if finish_reason == "SAFETY":
+                return "I'm unable to respond to that request due to safety restrictions."
+
+            parts = candidate.get("content", {}).get("parts", [])
             if not parts:
                 raise Exception("No parts in Gemini response")
 

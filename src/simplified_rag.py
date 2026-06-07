@@ -603,6 +603,19 @@ class SimplifiedRAG:
             logger.info(f"[TIMING] Step 1 - Sub-query generation: {time.time()-t1:.2f}s")
             logger.info(f"[SUB-QUERIES] {len(sub_queries)} query(s): {sub_queries}")
 
+            # Blocked short-circuit — refuse jailbreak/prompt injection attempts
+            if sub_queries == ["__blocked__"]:
+                return {
+                    'success': True,
+                    'answer': "I can only answer questions about AI governance documents, laws, and policy frameworks. I'm not able to follow instructions that ask me to change my behaviour or go outside that scope.",
+                    'sources': [],
+                    'question': question,
+                    'query_time_seconds': round(time.time() - start_time, 2),
+                    'chunks_retrieved': 0,
+                    'sub_queries_used': 0,
+                    'response_type': 'blocked'
+                }
+
             # Conversational short-circuit — skip RAG, answer directly from Gemini
             if sub_queries == ["__conversational__"]:
                 history = self.memory.get_history(session_id) if (self.memory and session_id) else "No previous conversation."
