@@ -139,6 +139,7 @@ class GeminiChatClient:
             if not answer_text:
                 raise Exception("No parts in Gemini response")
 
+            # finish_reason STOP or MAX_TOKENS — return whatever was generated
             return answer_text
         except requests.exceptions.Timeout:
             raise Exception("Gemini API timeout after 60 seconds")
