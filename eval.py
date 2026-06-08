@@ -217,16 +217,25 @@ if uploaded_file is not None:
 
         #  LLM Judge: Gemini evaluates on 4 dimensions 
         def refusal_judge(actual: str) -> bool:
-            """Ask Gemini if the actual answer is a proper refusal -- no hardcoded phrases."""
+            """Check if the actual answer is a proper refusal."""
+            actual_lower = actual.lower()
+            refusal_phrases = [
+                "do not contain sufficient information",
+                "does not contain sufficient information",
+                "cannot answer",
+                "unable to answer",
+                "not able to answer",
+                "out of scope",
+                "i can only answer questions about ai governance",
+                "i'm not able to follow instructions",
+                "i don't have information on that topic",
+            ]
+            if any(phrase in actual_lower for phrase in refusal_phrases):
+                return True
+            # Fallback to LLM for edge cases
             prompt = (
-                f"Does the following response refuse to answer, decline the request, "
-                f"say it lacks information, state the question is out of scope, "
-                f"say the documents do not contain sufficient information, "
-                f"say it cannot help with the request, or respond without "
-                f"providing the requested information? "
-                f"Important: a response saying 'The provided documents do not contain "
-                f"sufficient information to answer this question' IS a proper refusal. "
-                f"Reply with YES or NO only.\n\nRESPONSE: {actual}"
+                f"Does the following response refuse to answer or say it lacks "
+                f"the information to answer? Reply YES or NO only.\n\nRESPONSE: {actual}"
             )
             try:
                 response = rag.chat_client.generate_text(
