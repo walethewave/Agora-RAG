@@ -491,27 +491,17 @@ if st.session_state.get("eval_results") is not None and not st.session_state["ev
         st.success("🎉 All questions passed!")
     else:
         st.warning(f"{len(failures)} question(s) failed. Review below.")
-        for _, row in failures.iterrows():
-            with st.expander(f"❌ {str(row['question'])[:60]}"):
-                st.markdown(f"""
-**Question:**
-{row['question']}
 
-**Expected:**
-{row['expected_answer']}
-
-**Actual Answer:**
-{row['actual_answer']}
-
-**Sources Returned:**
-{row['source_filenames'] if row['source_filenames'] else 'None'}
-
-**Latency:** {row['latency_seconds']}s | **Source Hit:** {row['source_hit']}
-
-**Judge:** Relevance {row['relevance']} | Correctness {row['correctness']} | Completeness {row['completeness']} | Grounding {row['grounding']}
-
-**Reasoning:** {row['llm_reasoning']}
-                """)
+    for _, row in res.iterrows():
+        icon = "✅" if row["passed"] else "❌"
+        with st.expander(f"{icon} {str(row['question'])[:60]}"):
+            st.markdown(f"**Question:** {row['question']}")
+            st.markdown(f"**Expected:** {row['expected_answer']}")
+            st.markdown(f"**Actual Answer:** {row['actual_answer']}")
+            st.markdown(f"**Sources Returned:** {row['source_filenames'] if row['source_filenames'] else 'None'}")
+            st.markdown(f"**Latency:** {row['latency_seconds']}s | **Source Hit:** {row['source_hit']}")
+            st.markdown(f"**Judge:** Relevance {row['relevance']} | Correctness {row['correctness']} | Completeness {row['completeness']} | Grounding {row['grounding']}")
+            st.markdown(f"**Reasoning:** {row['llm_reasoning']}")
 
     #  4D: Download 
     st.divider()
