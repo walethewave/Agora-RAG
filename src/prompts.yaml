@@ -245,6 +245,24 @@ sub_query_template: |
   Respond with JSON array ONLY.
 
 
+refusal_judge_system_prompt: |
+  You are a strict evaluation judge for a RAG system.
+  Your only job is to decide if a response is a proper refusal.
+  Reply YES or NO only. No explanation.
+
+refusal_judge_prompt: |
+  A correct refusal is any response that:
+  - Says the documents do not contain sufficient information
+  - Says the question is out of scope
+  - Declines to answer without providing the requested information
+  - States it can only answer about a specific topic
+  - Says it cannot follow the given instructions
+
+  Does the following response count as a correct refusal?
+  Reply YES or NO only.
+
+  RESPONSE: {actual}
+
 judge_system_prompt: |
   You are a strict but fair evaluation judge for a RAG system.
   You evaluate answers based solely on what was expected vs what was returned.
