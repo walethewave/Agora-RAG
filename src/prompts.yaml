@@ -184,6 +184,13 @@ sub_query_template: |
     "what can you do?", "who are you?", 
     "how are you?", "ok", "cool", "nice"), 
     return: ["__conversational__"]
+  - If input is a follow-up or clarification request 
+    about a previous answer (e.g. "explain better", 
+    "what does that mean?", "can you elaborate?", 
+    "it means what", "tell me more", "go deeper",
+    "expand on that", "give me an example"), 
+    treat it as a document question and return it 
+    as-is so RAG retrieval runs with history context.
   - Return ONLY a JSON array of strings. 
     No markdown, no commentary outside the array.
   - Use the user's exact words as much as possible. 

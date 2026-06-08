@@ -627,7 +627,7 @@ class SimplifiedRAG:
                 answer = self.chat_client.generate_text(
                     system_prompt=self.conversational_prompt or self.system_prompt,
                     user_message=conv_message,
-                    max_tokens=400
+                    max_tokens=1000
                 )
                 if self.memory and session_id:
                     self.memory.save(session_id, question, answer)

@@ -121,9 +121,9 @@ class TestConstants(unittest.TestCase):
             EMBEDDING_DIMENSION, GEMINI_EMBEDDING_MODEL,
             GEMINI_TEXT_MODEL, GEMINI_API_BASE,
         )
-        self.assertEqual(CHUNK_TARGET_TOKENS, 1200)
+        self.assertEqual(CHUNK_TARGET_TOKENS, 500)
         self.assertEqual(CHUNK_OVERLAP_PCT, 0.20)
-        self.assertEqual(CHUNK_OVERLAP_TOKENS, 240)
+        self.assertEqual(CHUNK_OVERLAP_TOKENS, 100)
         self.assertEqual(EMBEDDING_DIMENSION, 1536)
         self.assertIn("embedding", GEMINI_EMBEDDING_MODEL.lower())
         self.assertIn("gemini", GEMINI_TEXT_MODEL.lower())
@@ -210,28 +210,29 @@ class TestPromptLoading(unittest.TestCase):
 
     def test_system_prompt_loaded(self):
         self.assertIsNotNone(self.rag.system_prompt)
-        self.assertIn("Cybercrime", self.rag.system_prompt)
-        self.assertIn("Section", self.rag.system_prompt)
+        self.assertIn("governance", self.rag.system_prompt.lower())
         self.assertIn("checkpoint", self.rag.system_prompt.lower())
 
-    def test_system_prompt_has_penalty_figures(self):
-        """System prompt must contain exact naira penalty figures."""
-        self.assertIn("N7,000,000", self.rag.system_prompt)
-        self.assertIn("N5,000,000", self.rag.system_prompt)
+    def test_system_prompt_has_grounding_rules(self):
+        """System prompt must contain core grounding and citation rules."""
+        self.assertIn("PROHIBITS", self.rag.system_prompt)
+        self.assertIn("REQUIRES", self.rag.system_prompt)
+        self.assertIn("RECOMMENDS", self.rag.system_prompt)
+        self.assertIn("PERMITS", self.rag.system_prompt)
 
-    def test_system_prompt_covers_key_offences(self):
-        """System prompt must reference the major offence sections."""
-        for section in ["Section 6", "Section 14", "Section 17"]:
-            self.assertIn(section, self.rag.system_prompt,
-                          f"{section} missing from system prompt")
+    def test_system_prompt_covers_key_themes(self):
+        """System prompt must reference core AI governance themes."""
+        for term in ["jurisdiction", "retrieved context", "enforcement"]:
+            self.assertIn(term, self.rag.system_prompt.lower(),
+                          f"'{term}' missing from system prompt")
 
     def test_user_template_placeholders(self):
         self.assertIn("{history}", self.rag.user_template)
         self.assertIn("{context}", self.rag.user_template)
         self.assertIn("{question}", self.rag.user_template)
 
-    def test_user_template_cites_act(self):
-        self.assertIn("Cybercrime Act 2015", self.rag.user_template)
+    def test_user_template_cites_examples(self):
+        self.assertIn("EU AI Act", self.rag.user_template)
 
     def test_sub_query_template_structure(self):
         self.assertIn("{user_query}", self.rag.sub_query_template)
@@ -239,9 +240,9 @@ class TestPromptLoading(unittest.TestCase):
         self.assertIn("__conversational__", self.rag.sub_query_template)
         self.assertIn("decomposition", self.rag.sub_query_template.lower())
 
-    def test_sub_query_template_has_cybercrime_examples(self):
-        """Sub-query template must have examples relevant to this Act."""
-        self.assertIn("cyberstalking", self.rag.sub_query_template.lower())
+    def test_sub_query_template_has_governance_examples(self):
+        """Sub-query template must have examples relevant to AI governance."""
+        self.assertIn("jurisdiction", self.rag.sub_query_template.lower())
 
 
 # ── TestPDFExtraction ─────────────────────────────────────────────────────────
