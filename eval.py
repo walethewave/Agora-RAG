@@ -221,8 +221,11 @@ if uploaded_file is not None:
             prompt = (
                 f"Does the following response refuse to answer, decline the request, "
                 f"say it lacks information, state the question is out of scope, "
-                f"say it cannot help with the request, or respond as an AI without "
+                f"say the documents do not contain sufficient information, "
+                f"say it cannot help with the request, or respond without "
                 f"providing the requested information? "
+                f"Important: a response saying 'The provided documents do not contain "
+                f"sufficient information to answer this question' IS a proper refusal. "
                 f"Reply with YES or NO only.\n\nRESPONSE: {actual}"
             )
             try:
